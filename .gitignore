@@ -10,3 +10,9 @@ songs/
 *.swp
 database/fingerprints.db
 database/fingerprints.db-journal
+database/fingerprints.db-wal
+database/fingerprints.db-shm
+database/*.db
+database/*.db-journal
+database/*.db-wal
+database/*.db-shm
