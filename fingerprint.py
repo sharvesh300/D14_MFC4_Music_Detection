@@ -5,7 +5,7 @@ from scipy.ndimage import maximum_filter
 
 class AudioFingerprinter:
 
-    def __init__(self, sample_rate=22050):
+    def __init__(self, sample_rate=8000):
         self.sample_rate = sample_rate
         self.n_fft = 2048
         self.hop_length = 512
@@ -31,6 +31,7 @@ class AudioFingerprinter:
 
         y = y - np.mean(y)
 
+        y = librosa.effects.preemphasis(y)
         return y, sr
 
     def generate_spectrogram(self, y):
@@ -66,7 +67,8 @@ class AudioFingerprinter:
         detected_peaks = (S_db == local_max)
 
         # 3️ Apply amplitude threshold
-        threshold_mask = S_db > amp_min
+        threshold = np.percentile(S_db, 85, axis=0)
+        threshold_mask = S_db > threshold[np.newaxis, :]
 
         # 4️ Combine masks
         peaks_mask = detected_peaks & threshold_mask
@@ -99,7 +101,7 @@ class AudioFingerprinter:
             return None
 
         FREQ_BITS = 9
-        DELTA_BITS = 6
+        DELTA_BITS = 8
 
         return (f1_coarse << (FREQ_BITS + DELTA_BITS)) | (f2_coarse << DELTA_BITS   ) | delta_t_bin
 
@@ -112,40 +114,41 @@ class AudioFingerprinter:
         freq_bin_size=10
     ):
         """
-        Industry-style 64-bit landmark hashing.
-
-        Returns:
-            List of (hash_value, anchor_time)
+        Industry-style 64-bit landmark hashing with Target Zones.
         """
-
         if not peaks:
             return []
 
+        # Ensure peaks are sorted by time
         peaks_sorted = sorted(peaks, key=lambda x: x[1])
         hashes = []
         total_peaks = len(peaks_sorted)
 
         for i in range(total_peaks):
             f1, t1 = peaks_sorted[i]
+            valid_pairs = 0  # Track actual pairs made, not just array indices
 
-            for j in range(1, fan_value + 1):
-
-                if i + j >= total_peaks:
-                    break
-
+            # Scan forward through the remaining array
+            for j in range(1, total_peaks - i):
                 f2, t2 = peaks_sorted[i + j]
                 delta_t = t2 - t1
 
+                # 1. Skip over peaks that are too close in time
                 if delta_t < delta_t_min:
                     continue
-
+                
+                # 2. TARGET ZONE LIMIT: If we scan past the max time window, stop searching for this anchor
                 if delta_t > delta_t_max:
                     break
 
+                # 3. Create the hash
                 hash_value = self._make_hash(f1, f2, delta_t, freq_bin_size)
-                if hash_value is None:
-                    continue
+                if hash_value is not None:
+                    hashes.append((hash_value, t1))
+                    valid_pairs += 1  # Successfully paired with a peak in the target zone
 
-                hashes.append((hash_value, t1))
+                # 4. FAN VALUE LIMIT: Stop once we hit the limit OF VALID PAIRS
+                if valid_pairs >= fan_value:
+                    break
 
         return hashes

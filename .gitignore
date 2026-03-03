@@ -8,3 +8,5 @@ songs/
 *.pyo
 *.pyd
 *.swp
+database/fingerprints.db
+database/fingerprints.db-journal

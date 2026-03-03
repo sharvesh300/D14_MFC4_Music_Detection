@@ -33,7 +33,7 @@ SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg"}
 
 # Clip settings
 CLIP_DURATION  = 4       # seconds per sample
-TARGET_SR      = 22050   # output sample rate
+TARGET_SR      = 8000   # output sample rate
 
 # Number of clips to extract per song.
 # The song is split into this many equal segments and one clip is picked
@@ -43,9 +43,9 @@ N_SAMPLES = 10
 # Noise profiles applied to each clip (name, SNR dB)
 # Lower SNR = more noise = harder match
 NOISE_PROFILES = [
-    ("light",  20),   # barely audible noise
-    ("medium", 10),   # clearly noisy, like a phone recording
-    ("heavy",   5),   # heavy background noise
+    ("light",  10),   # barely audible noise
+    ("medium", 0),   # clearly noisy, like a phone recording
+    ("heavy",   -5),   # heavy background noise
 ]
 
 
