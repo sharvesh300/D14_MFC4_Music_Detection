@@ -52,7 +52,7 @@ class AudioFingerprinter:
 
         return S_db
     
-    def find_peaks(self, S_db, amp_min=-40):
+    def find_peaks(self, S_db, amp_min=-60):
         """
         Detect spectral peaks from log spectrogram.
 
@@ -78,13 +78,38 @@ class AudioFingerprinter:
 
         return peaks
     
+    @staticmethod
+    def _make_hash(f1_bin, f2_bin, delta_t, freq_bin_size=5):
+        """
+        Pack two frequency bins and a time delta into a single 64-bit hash.
+
+        Layout: [f1 16-bit][f2 16-bit][dt 16-bit][reserved 16-bit]
+
+        Frequency bins are coarsened by 2x before packing so the hash is
+        tolerant to slight pitch shifts and compression artefacts.
+
+        Returns the hash integer, or None if any field overflows 16 bits.
+        """
+        f1_coarse = (f1_bin // freq_bin_size)
+        f2_coarse = (f2_bin // freq_bin_size)
+
+        delta_t_bin = delta_t//2
+
+        if f1_coarse >= 65536 or f2_coarse >= 65536 or delta_t_bin >= 65536:
+            return None
+
+        FREQ_BITS = 9
+        DELTA_BITS = 6
+
+        return (f1_coarse << (FREQ_BITS + DELTA_BITS)) | (f2_coarse << DELTA_BITS   ) | delta_t_bin
+
     def generate_hashes(
         self,
         peaks,
-        fan_value=7,
+        fan_value=10,
         delta_t_min=1,
         delta_t_max=200,
-        freq_bin_size=5
+        freq_bin_size=10
     ):
         """
         Industry-style 64-bit landmark hashing.
@@ -103,9 +128,6 @@ class AudioFingerprinter:
         for i in range(total_peaks):
             f1, t1 = peaks_sorted[i]
 
-            # Quantize anchor frequency
-            f1_bin = f1 // freq_bin_size
-
             for j in range(1, fan_value + 1):
 
                 if i + j >= total_peaks:
@@ -120,20 +142,9 @@ class AudioFingerprinter:
                 if delta_t > delta_t_max:
                     break
 
-                # Quantize target frequency
-                f2_bin = f2 // freq_bin_size
-
-                # Ensure values fit 16-bit range
-                if f1_bin >= 65536 or f2_bin >= 65536 or delta_t >= 65536:
+                hash_value = self._make_hash(f1, f2, delta_t, freq_bin_size)
+                if hash_value is None:
                     continue
-
-                # 64-bit packed hash:
-                # [f1 16][f2 16][dt 16][reserved 16]
-                hash_value = (
-                    (f1_bin << 48) |
-                    (f2_bin << 32) |
-                    (delta_t << 16)
-                )
 
                 hashes.append((hash_value, t1))
 
