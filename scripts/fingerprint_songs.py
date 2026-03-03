@@ -57,13 +57,21 @@ def main():
                 continue
 
             try:
-                y, sr  = fp.preprocess(audio_path)
-                S_db   = fp.generate_spectrogram(y)
-                peaks  = fp.find_peaks(S_db)
-                hashes = fp.generate_hashes(peaks)
+                # --- Normal hashes (broadband) ---
+                y, sr       = fp.preprocess(audio_path, is_phone_mode=False)
+                S_db        = fp.generate_spectrogram(y)
+                peaks       = fp.find_peaks(S_db)
+                hashes      = fp.generate_hashes(peaks)
 
-                insert_fingerprints_bulk(conn, song_id, hashes)
-                print(f"done ({len(hashes)} hashes stored).")
+                # --- Phone-mode hashes (bandpass filtered) ---
+                y_bp, sr_bp = fp.preprocess(audio_path, is_phone_mode=True)
+                S_db_bp     = fp.generate_spectrogram(y_bp)
+                peaks_bp    = fp.find_peaks(S_db_bp)
+                hashes_bp   = fp.generate_hashes(peaks_bp)
+
+                all_hashes = hashes + hashes_bp
+                insert_fingerprints_bulk(conn, song_id, all_hashes)
+                print(f"done ({len(hashes)} normal + {len(hashes_bp)} phone-mode hashes stored).")
 
             except Exception as e:
                 print(f"ERROR: {e}")

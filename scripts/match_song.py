@@ -2,11 +2,12 @@
 Match a single audio clip against the fingerprint database.
 
 Usage:
-    python scripts/match_song.py <path_to_audio_file>
+    python scripts/match_song.py <path_to_audio_file> [--phone-mode]
 
 Example:
     python scripts/match_song.py songs/samples/Neelothi_sample_2.wav
     python scripts/match_song.py songs/samples_noisy/Neelothi_sample_2_heavy.wav
+    python scripts/match_song.py songs/test/thee_koluthi.wav --phone-mode
 """
 
 import os
@@ -24,8 +25,8 @@ MIN_CONFIDENCE = 0.02
 TOP_N          = 5
 
 
-def match(conn, fp, audio_path):
-    y, sr  = fp.preprocess(audio_path)
+def match(conn, fp, audio_path, is_phone_mode=False):
+    y, sr  = fp.preprocess(audio_path, is_phone_mode=is_phone_mode)
     S_db   = fp.generate_spectrogram(y)
     peaks  = fp.find_peaks(S_db)
     hashes = fp.generate_hashes(peaks)
@@ -63,10 +64,11 @@ def song_name_from_id(conn, song_id):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python scripts/match_song.py <path_to_audio_file>")
+        print("Usage: python scripts/match_song.py <path_to_audio_file> [--phone-mode]")
         sys.exit(1)
 
-    audio_path = sys.argv[1]
+    audio_path    = sys.argv[1]
+    is_phone_mode = "--phone-mode" in sys.argv
 
     if not os.path.isfile(audio_path):
         print(f"File not found: {audio_path}")
@@ -76,14 +78,15 @@ def main():
         print(f"Database not found: {DB_PATH} — run fingerprint_songs.py first.")
         sys.exit(1)
 
-    print(f"Query : {audio_path}")
-    print(f"DB    : {DB_PATH}\n")
+    print(f"Query      : {audio_path}")
+    print(f"Phone mode : {'ON' if is_phone_mode else 'OFF'}")
+    print(f"DB         : {DB_PATH}\n")
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA query_only = ON")
     fp = AudioFingerprinter()
 
-    ranked, n_hashes = match(conn, fp, audio_path)
+    ranked, n_hashes = match(conn, fp, audio_path, is_phone_mode=is_phone_mode)
 
     print(f"Hashes generated : {n_hashes}")
     print(f"Matches found    : {len(ranked)}\n")

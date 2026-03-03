@@ -1,5 +1,12 @@
 from collections import defaultdict
 import sqlite3
+from scipy.signal import butter, lfilter
+
+
+def bandpass(y, sr, low=300, high=3400):
+    nyq = sr / 2
+    b, a = butter(4, [low / nyq, high / nyq], btype='band')
+    return lfilter(b, a, y)
 
 
 def match_sample(db_path, sample_hashes):

@@ -50,7 +50,7 @@ NOISE_PROFILES = [
 
 
 def add_noise(y, snr_db):
-    """Add white Gaussian noise at the given SNR (dB)."""
+    """Add Gaussian noise at the given SNR (dB)."""
     signal_power = np.mean(y ** 2)
     noise_power  = signal_power / (10 ** (snr_db / 10))
     noise        = np.random.normal(0, np.sqrt(noise_power), size=y.shape)

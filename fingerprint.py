@@ -1,6 +1,7 @@
 import librosa
 import numpy as np
 from scipy.ndimage import maximum_filter
+from matcher import bandpass
 
 
 class AudioFingerprinter:
@@ -12,9 +13,14 @@ class AudioFingerprinter:
         self.fan_value = 10
         self.target_zone_time = 50
 
-    def preprocess(self, file_path):
+    def preprocess(self, file_path, is_phone_mode=False):
         """
         Load audio and standardize it.
+
+        is_phone_mode : bool
+            When True, apply a 300–3400 Hz bandpass filter after standard
+            preprocessing to simulate telephone / GSM channel conditions.
+
         Returns:
             y  -> normalized mono waveform
             sr -> fixed sample rate
@@ -26,12 +32,15 @@ class AudioFingerprinter:
             mono=True
         )
 
-
         y = librosa.util.normalize(y)
 
         y = y - np.mean(y)
 
         y = librosa.effects.preemphasis(y)
+
+        if is_phone_mode:
+            y = bandpass(y, sr)
+
         return y, sr
 
     def generate_spectrogram(self, y):
@@ -53,7 +62,7 @@ class AudioFingerprinter:
 
         return S_db
     
-    def find_peaks(self, S_db, amp_min=-60):
+    def find_peaks(self, S_db, amp_min=-50):
         """
         Detect spectral peaks from log spectrogram.
 
@@ -69,9 +78,11 @@ class AudioFingerprinter:
         # 3️ Apply amplitude threshold
         threshold = np.percentile(S_db, 85, axis=0)
         threshold_mask = S_db > threshold[np.newaxis, :]
+        peaks_mask = detected_peaks & (S_db > amp_min)
 
         # 4️ Combine masks
-        peaks_mask = detected_peaks & threshold_mask
+        # peaks_mask = detected_peaks & threshold_mask
+        peaks_mask = detected_peaks & (S_db > amp_min)
 
         # 5️ Extract peak indices
         freq_indices, time_indices = np.where(peaks_mask)
@@ -103,7 +114,7 @@ class AudioFingerprinter:
         FREQ_BITS = 9
         DELTA_BITS = 8
 
-        return (f1_coarse << (FREQ_BITS + DELTA_BITS)) | (f2_coarse << DELTA_BITS   ) | delta_t_bin
+        return (f1_coarse << (FREQ_BITS + DELTA_BITS)) | (f2_coarse << DELTA_BITS ) | delta_t_bin
 
     def generate_hashes(
         self,
@@ -152,3 +163,119 @@ class AudioFingerprinter:
                     break
 
         return hashes
+
+    @staticmethod
+    def tune_parameters(
+        audio_paths_and_labels,
+        match_fn,
+        fan_values=(5, 10, 15, 20),
+        delta_t_max_values=(100, 200, 300),
+        freq_bin_size_values=(5, 10),
+        min_confidence_values=(0.01, 0.02, 0.05),
+        sample_rate=8000,
+        verbose=True,
+    ):
+        """
+        Grid-search over fan_value, delta_t_max, freq_bin_size, and
+        min_confidence to maximise Top-1 accuracy on a labelled probe set.
+
+        Parameters
+        ----------
+        audio_paths_and_labels : list of (str, str)
+            Pairs of (audio_file_path, expected_song_name).
+        match_fn : callable
+            Signature: match_fn(hashes, min_confidence=float)
+              -> list of (song_name, confidence) ranked best-first.
+            'hashes' is the list[(hash_value, offset_t)] from generate_hashes.
+        fan_values, delta_t_max_values, freq_bin_size_values, min_confidence_values
+            Iterables defining the grid to search.
+        verbose : bool
+            Print a result table while running.
+
+        Returns
+        -------
+        best_params : dict
+            Keys: 'fan_value', 'delta_t_max', 'freq_bin_size', 'min_confidence'
+        all_results : list of dict
+            Every combination tried, sorted by top1_acc descending.
+        """
+        import itertools
+
+        grid = list(itertools.product(
+            fan_values,
+            delta_t_max_values,
+            freq_bin_size_values,
+            min_confidence_values,
+        ))
+
+        if verbose:
+            print(f"\nParameter tuning: {len(grid)} combinations × {len(audio_paths_and_labels)} probes")
+            print(f"{'fan':>5} {'dt_max':>7} {'fbsz':>6} {'min_conf':>9}  {'Top-1':>7}  {'Top-3':>7}")
+            print("-" * 60)
+
+        all_results = []
+        fp = AudioFingerprinter(sample_rate=sample_rate)
+
+        for fan_value, delta_t_max, freq_bin_size, min_conf in grid:
+            top1 = top3 = total = 0
+
+            for audio_path, expected in audio_paths_and_labels:
+                try:
+                    y, _   = fp.preprocess(audio_path)
+                    S_db   = fp.generate_spectrogram(y)
+                    peaks  = fp.find_peaks(S_db)
+                    hashes = fp.generate_hashes(
+                        peaks,
+                        fan_value=fan_value,
+                        delta_t_max=delta_t_max,
+                        freq_bin_size=freq_bin_size,
+                    )
+                    ranked = match_fn(hashes, min_confidence=min_conf)
+                except Exception:
+                    continue
+
+                total += 1
+                if not ranked:
+                    continue
+
+                top_names = [name for name, _ in ranked]
+                if top_names[0] == expected:
+                    top1 += 1
+                if expected in top_names:
+                    top3 += 1
+
+            top1_acc = top1 / total if total else 0.0
+            top3_acc = top3 / total if total else 0.0
+
+            result = {
+                "fan_value":      fan_value,
+                "delta_t_max":    delta_t_max,
+                "freq_bin_size":  freq_bin_size,
+                "min_confidence": min_conf,
+                "top1_acc":       top1_acc,
+                "top3_acc":       top3_acc,
+                "total":          total,
+            }
+            all_results.append(result)
+
+            if verbose:
+                print(
+                    f"{fan_value:>5} {delta_t_max:>7} {freq_bin_size:>6}"
+                    f" {min_conf:>9.3f}  {top1_acc:>6.1%}  {top3_acc:>6.1%}"
+                )
+
+        # Sort best first: primary = top1_acc, tiebreak = top3_acc
+        all_results.sort(key=lambda r: (r["top1_acc"], r["top3_acc"]), reverse=True)
+        best = all_results[0] if all_results else {}
+
+        if verbose and best:
+            print("\nBest parameters found:")
+            for k in ("fan_value", "delta_t_max", "freq_bin_size", "min_confidence"):
+                print(f"  {k}: {best[k]}")
+            print(f"  top1_acc: {best['top1_acc']:.1%}  top3_acc: {best['top3_acc']:.1%}")
+
+        best_params = (
+            {k: best[k] for k in ("fan_value", "delta_t_max", "freq_bin_size", "min_confidence")}
+            if best else {}
+        )
+        return best_params, all_results
