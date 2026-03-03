@@ -77,3 +77,64 @@ class AudioFingerprinter:
         peaks = list(zip(freq_indices, time_indices))
 
         return peaks
+    
+    def generate_hashes(
+        self,
+        peaks,
+        fan_value=7,
+        delta_t_min=1,
+        delta_t_max=200,
+        freq_bin_size=5
+    ):
+        """
+        Industry-style 64-bit landmark hashing.
+
+        Returns:
+            List of (hash_value, anchor_time)
+        """
+
+        if not peaks:
+            return []
+
+        peaks_sorted = sorted(peaks, key=lambda x: x[1])
+        hashes = []
+        total_peaks = len(peaks_sorted)
+
+        for i in range(total_peaks):
+            f1, t1 = peaks_sorted[i]
+
+            # Quantize anchor frequency
+            f1_bin = f1 // freq_bin_size
+
+            for j in range(1, fan_value + 1):
+
+                if i + j >= total_peaks:
+                    break
+
+                f2, t2 = peaks_sorted[i + j]
+                delta_t = t2 - t1
+
+                if delta_t < delta_t_min:
+                    continue
+
+                if delta_t > delta_t_max:
+                    break
+
+                # Quantize target frequency
+                f2_bin = f2 // freq_bin_size
+
+                # Ensure values fit 16-bit range
+                if f1_bin >= 65536 or f2_bin >= 65536 or delta_t >= 65536:
+                    continue
+
+                # 64-bit packed hash:
+                # [f1 16][f2 16][dt 16][reserved 16]
+                hash_value = (
+                    (f1_bin << 48) |
+                    (f2_bin << 32) |
+                    (delta_t << 16)
+                )
+
+                hashes.append((hash_value, t1))
+
+        return hashes
