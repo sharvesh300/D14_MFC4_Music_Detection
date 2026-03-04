@@ -24,19 +24,17 @@ Grid defaults (edit the constants below to widen / narrow the search):
 import argparse
 import itertools
 import os
-import sqlite3
 import sys
 from collections import defaultdict
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fingerprint import AudioFingerprinter
-from database import match_fingerprints_bulk
+from database import get_connection, match_fingerprints_bulk
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-DB_PATH     = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
 SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "..", "songs", "samples")
 NOISY_DIR   = os.path.join(os.path.dirname(__file__), "..", "songs", "samples_noisy")
 NOISE_LEVELS = ["light", "medium", "heavy"]
@@ -65,9 +63,8 @@ def expected_name_from_filename(filename):
     return parts[0] if len(parts) == 2 else base
 
 
-def song_name_from_id(conn, song_id):
-    row = conn.execute("SELECT name FROM songs WHERE id = ?", (song_id,)).fetchone()
-    return row[0] if row else "Unknown"
+def song_name_from_id(r, song_id):
+    return r.hget(f"song:{song_id}", "name") or "Unknown"
 
 
 def collect_probes(folder, suffix_filter=None, max_probes=None):
@@ -112,7 +109,7 @@ def fingerprint_clip(fp, audio_path, fan_value, delta_t_max, freq_bin_size):
 # Core: match hashes against DB with offset-alignment voting
 # ---------------------------------------------------------------------------
 
-def match_hashes(conn, hashes, min_confidence, top_n=3):
+def match_hashes(r, hashes, min_confidence, top_n=3):
     """
     Return ranked list of (song_name, confidence) using offset-alignment voting.
     """
@@ -125,7 +122,7 @@ def match_hashes(conn, hashes, min_confidence, top_n=3):
     for h, t in hashes:
         hash_to_query_times[int(h)].append(t)
 
-    db_rows = match_fingerprints_bulk(conn, hash_values)
+    db_rows = match_fingerprints_bulk(r, hash_values)
 
     votes = defaultdict(lambda: defaultdict(int))
     for hash_value, song_id, db_t in db_rows:
@@ -145,7 +142,7 @@ def match_hashes(conn, hashes, min_confidence, top_n=3):
 # Grid search
 # ---------------------------------------------------------------------------
 
-def run_grid_search(conn, probes, label, fan_values, delta_t_max_values,
+def run_grid_search(r, probes, label, fan_values, delta_t_max_values,
                     freq_bin_size_values, min_conf_values, top_n_results):
     fp = AudioFingerprinter(sample_rate=8000)
     grid = list(itertools.product(fan_values, delta_t_max_values,
@@ -167,7 +164,7 @@ def run_grid_search(conn, probes, label, fan_values, delta_t_max_values,
             try:
                 hashes = fingerprint_clip(fp, audio_path, fan_value,
                                           delta_t_max, freq_bin_size)
-                ranked = match_hashes(conn, hashes, min_conf)
+                ranked = match_hashes(r, hashes, min_conf)
             except Exception as exc:
                 print(f"    ERROR {os.path.basename(audio_path)}: {exc}")
                 continue
@@ -177,7 +174,7 @@ def run_grid_search(conn, probes, label, fan_values, delta_t_max_values,
                 no_match += 1
                 continue
 
-            top_names = [song_name_from_id(conn, sid) for sid, _ in ranked]
+            top_names = [song_name_from_id(r, sid) for sid, _ in ranked]
             if top_names[0] == expected:
                 top1 += 1
             if expected in top_names:
@@ -200,16 +197,16 @@ def run_grid_search(conn, probes, label, fan_values, delta_t_max_values,
               f"{top1_acc:>6.1%}  {top3_acc:>6.1%}  {no_match:>9}")
 
     # Sort: best top1_acc first, tiebreak top3_acc
-    results.sort(key=lambda r: (r["top1_acc"], r["top3_acc"]), reverse=True)
+    results.sort(key=lambda x: (x["top1_acc"], x["top3_acc"]), reverse=True)
 
     print(f"\n  Top-{top_n_results} parameter combinations for [{label}]:")
     print(f"  {'Rank':>5}  {'fan':>4} {'dt_max':>7} {'fbsz':>5} {'min_conf':>9}  "
           f"{'Top-1':>7}  {'Top-3':>7}")
     print(f"  {'-'*65}")
-    for rank, r in enumerate(results[:top_n_results], 1):
-        print(f"  {rank:>5}  {r['fan_value']:>4} {r['delta_t_max']:>7} "
-              f"{r['freq_bin_size']:>5} {r['min_confidence']:>9.3f}  "
-              f"{r['top1_acc']:>6.1%}  {r['top3_acc']:>6.1%}")
+    for rank, row in enumerate(results[:top_n_results], 1):
+        print(f"  {rank:>5}  {row['fan_value']:>4} {row['delta_t_max']:>7} "
+              f"{row['freq_bin_size']:>5} {row['min_confidence']:>9.3f}  "
+              f"{row['top1_acc']:>6.1%}  {row['top3_acc']:>6.1%}")
 
     if results:
         best = results[0]
@@ -249,12 +246,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if not os.path.isfile(DB_PATH):
-        print(f"Database not found: {DB_PATH}\nRun scripts/fingerprint_songs.py first.")
+    r = get_connection()
+    if not r.exists("songs:counter"):
+        print("No songs found in Redis.\nRun scripts/fingerprint_songs.py first.")
         sys.exit(1)
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA query_only = ON")
 
     all_best = {}
 
@@ -272,7 +267,7 @@ def main():
             continue
 
         results = run_grid_search(
-            conn, probes, label,
+            r, probes, label,
             fan_values=args.fan_values,
             delta_t_max_values=args.delta_t_max,
             freq_bin_size_values=args.freq_bin_size,
@@ -282,8 +277,6 @@ def main():
         if results:
             all_best[split] = results[0]
 
-    conn.close()
-
     if len(all_best) > 1:
         print(f"\n\n{'='*80}")
         print("  SUMMARY — best params per split")
@@ -291,10 +284,10 @@ def main():
         print(f"  {'Split':<18} {'fan':>4} {'dt_max':>7} {'fbsz':>5} "
               f"{'min_conf':>9}  {'Top-1':>7}  {'Top-3':>7}")
         print(f"  {'-'*72}")
-        for split, r in all_best.items():
-            print(f"  {split:<18} {r['fan_value']:>4} {r['delta_t_max']:>7} "
-                  f"{r['freq_bin_size']:>5} {r['min_confidence']:>9.3f}  "
-                  f"{r['top1_acc']:>6.1%}  {r['top3_acc']:>6.1%}")
+        for split, row in all_best.items():
+            print(f"  {split:<18} {row['fan_value']:>4} {row['delta_t_max']:>7} "
+                  f"{row['freq_bin_size']:>5} {row['min_confidence']:>9.3f}  "
+                  f"{row['top1_acc']:>6.1%}  {row['top3_acc']:>6.1%}")
         print()
 
 

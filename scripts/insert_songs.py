@@ -3,18 +3,16 @@ import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from database import create_database, insert_song
-from extract_metadata import extract_metadata
+from database import get_connection, create_database, insert_song
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
 SONGS_DIR = os.path.join(os.path.dirname(__file__), "..", "songs")
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg"}
 
 
 def main():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    create_database(DB_PATH)
+    r = get_connection()
+    create_database(r)
 
     song_files = sorted(
         f for f in os.listdir(SONGS_DIR)
@@ -25,27 +23,23 @@ def main():
         print("No audio files found in the songs folder.")
         return
 
-    print(f"Found {len(song_files)} song(s). Extracting metadata and inserting into database...\n")
+    print(f"Found {len(song_files)} song(s). Inserting into Redis...\n")
 
+    inserted = 0
     for filename in song_files:
-        filepath = os.path.join(SONGS_DIR, filename)
         song_name = os.path.splitext(filename)[0]
 
-        meta = extract_metadata(filepath)
-        song_id = insert_song(DB_PATH, song_name, meta=meta)
+        if r.exists(f"song:name:{song_name}"):
+            print(f"  [skip] {song_name}")
+            continue
 
-        title   = meta.get("title") or song_name
-        artist  = meta.get("artist") or "(unknown)"
-        duration = meta.get("duration_formatted") or "?"
-        cover   = meta.get("cover_image_path") or "(none)"
-        print(f"  [{song_id:>3}] {title}")
-        print(f"         Artist  : {artist}")
-        print(f"         Duration: {duration}")
-        print(f"         Cover   : {cover}")
-        print()
+        song_id = insert_song(r, song_name)
+        print(f"  [{song_id:>3}] {song_name}")
+        inserted += 1
 
-    print(f"Done. {len(song_files)} song(s) inserted into {DB_PATH}")
+    print(f"\nDone. {inserted} new song(s) inserted.")
 
 
 if __name__ == "__main__":
     main()
+

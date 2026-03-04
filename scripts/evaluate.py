@@ -13,15 +13,13 @@ Output: per-sample results + aggregate metrics per set (clean / per noise level)
 
 import os
 import sys
-import sqlite3
 from collections import defaultdict
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fingerprint import AudioFingerprinter
-from database import match_fingerprints_bulk
+from database import get_connection, match_fingerprints_bulk
 
-DB_PATH      = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
 SAMPLES_DIR  = os.path.join(os.path.dirname(__file__), "..", "songs", "samples")
 NOISY_DIR    = os.path.join(os.path.dirname(__file__), "..", "songs", "samples_noisy")
 
@@ -33,12 +31,12 @@ MIN_CONFIDENCE = 0.02   # normalised score threshold — reject matches below th
 # Matching logic
 # ---------------------------------------------------------------------------
 
-def query(conn, fp, audio_path, top_n=3):
+def query(r, fp, audio_path, top_n=3):
     """
     Fingerprint a clip and return ranked (song_id, confidence) pairs.
 
     Optimizations applied:
-      - Query optimization : single batched SQL IN (...) instead of N individual queries
+      - Query optimization : single Redis pipeline LRANGE instead of N individual queries
       - Score normalization: raw vote count / total query hashes  →  0–1 confidence
       - Thresholding       : results below MIN_CONFIDENCE are discarded as no-match
     """
@@ -59,7 +57,7 @@ def query(conn, fp, audio_path, top_n=3):
     for h, t in hashes:
         hash_to_query_times[int(h)].append(t)
 
-    db_rows = match_fingerprints_bulk(conn, hash_values)  # (hash_value, song_id, db_t)
+    db_rows = match_fingerprints_bulk(r, hash_values)  # (hash_value, song_id, db_t)
 
     # --- Offset-alignment voting ---
     votes = defaultdict(lambda: defaultdict(int))
@@ -80,9 +78,8 @@ def query(conn, fp, audio_path, top_n=3):
     return ranked[:top_n], n_hashes
 
 
-def song_name_from_id(conn, song_id):
-    row = conn.execute("SELECT name FROM songs WHERE id = ?", (song_id,)).fetchone()
-    return row[0] if row else "Unknown"
+def song_name_from_id(r, song_id):
+    return r.hget(f"song:{song_id}", "name") or "Unknown"
 
 
 def expected_name_from_filename(filename, noise_levels):
@@ -105,7 +102,7 @@ def expected_name_from_filename(filename, noise_levels):
 # Evaluation of a single folder
 # ---------------------------------------------------------------------------
 
-def evaluate_folder(conn, fp, folder, label, noise_levels):
+def evaluate_folder(r, fp, folder, label, noise_levels):
     files = sorted([
         f for f in os.listdir(folder)
         if f.endswith(".wav") or f.endswith(".mp3")
@@ -130,7 +127,7 @@ def evaluate_folder(conn, fp, folder, label, noise_levels):
         total     += 1
 
         try:
-            ranked, _ = query(conn, fp, audio_path)
+            ranked, _ = query(r, fp, audio_path)
         except Exception as e:
             print(f"  ERROR {filename}: {e}")
             total -= 1
@@ -142,8 +139,8 @@ def evaluate_folder(conn, fp, folder, label, noise_levels):
             continue
 
         top1_id, top1_conf = ranked[0]
-        predicted  = song_name_from_id(conn, top1_id)
-        top3_names = [song_name_from_id(conn, sid) for sid, _ in ranked]
+        predicted  = song_name_from_id(r, top1_id)
+        top3_names = [song_name_from_id(r, sid) for sid, _ in ranked]
 
         is_top1 = predicted == expected
         is_top3 = expected in top3_names
@@ -180,21 +177,20 @@ def evaluate_folder(conn, fp, folder, label, noise_levels):
 # ---------------------------------------------------------------------------
 
 def main():
-    if not os.path.isfile(DB_PATH):
-        print(f"Database not found: {DB_PATH}  — run fingerprint_songs.py first.")
+    r = get_connection()
+    if not r.exists("songs:counter"):
+        print("No songs found in Redis — run insert_songs.py and fingerprint_songs.py first.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA query_only = ON")
     fp = AudioFingerprinter()
 
     results = []
 
     # --- Clean samples ---
     if os.path.isdir(SAMPLES_DIR):
-        r = evaluate_folder(conn, fp, SAMPLES_DIR, "CLEAN SAMPLES", NOISE_LEVELS)
-        if r:
-            results.append(r)
+        ev = evaluate_folder(r, fp, SAMPLES_DIR, "CLEAN SAMPLES", NOISE_LEVELS)
+        if ev:
+            results.append(ev)
 
     # --- Noisy samples per noise level ---
     if os.path.isdir(NOISY_DIR):
@@ -207,8 +203,6 @@ def main():
             if not level_files:
                 continue
 
-            # Evaluate using a temporary subfolder view (pass the full dir + filter)
-            # We do this inline to avoid creating physical subfolders
             print(f"\n{'='*120}")
             print(f"  NOISY SAMPLES — {level.upper()}  ({len(level_files)} samples)")
             print(f"{'='*120}")
@@ -224,7 +218,7 @@ def main():
                 total     += 1
 
                 try:
-                    ranked, _ = query(conn, fp, audio_path)
+                    ranked, _ = query(r, fp, audio_path)
                 except Exception as e:
                     print(f"  ERROR {filename}: {e}")
                     total -= 1
@@ -236,8 +230,8 @@ def main():
                     continue
 
                 top1_id, top1_conf = ranked[0]
-                predicted  = song_name_from_id(conn, top1_id)
-                top3_names = [song_name_from_id(conn, sid) for sid, _ in ranked]
+                predicted  = song_name_from_id(r, top1_id)
+                top3_names = [song_name_from_id(r, sid) for sid, _ in ranked]
 
                 is_top1 = predicted == expected
                 is_top3 = expected in top3_names
@@ -267,8 +261,6 @@ def main():
 
             results.append({"label": f"noisy/{level}", "total": total, "top1": top1, "top3": top3, "no_match": no_match})
 
-    conn.close()
-
     # ---------------------------------------------------------------------------
     # Overall comparison table
     # ---------------------------------------------------------------------------
@@ -278,9 +270,9 @@ def main():
         print(f"{'='*70}")
         print(f"  {'Set':<22} {'Total':>6} {'Top-1 %':>9} {'Top-3 %':>9} {'No match':>9}")
         print(f"  {'-'*68}")
-        for r in results:
-            t = r["total"] or 1
-            print(f"  {r['label']:<22} {r['total']:>6} {100*r['top1']/t:>8.1f}% {100*r['top3']/t:>8.1f}% {r['no_match']:>9}")
+        for ev in results:
+            t = ev["total"] or 1
+            print(f"  {ev['label']:<22} {ev['total']:>6} {100*ev['top1']/t:>8.1f}% {100*ev['top3']/t:>8.1f}% {ev['no_match']:>9}")
         print()
 
 

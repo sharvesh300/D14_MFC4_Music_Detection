@@ -1,42 +1,37 @@
 import os
 import sys
-import sqlite3
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
+from database import get_connection
 
 
 def main():
-    if not os.path.isfile(DB_PATH):
-        print(f"Database not found: {DB_PATH}")
-        return
+    r = get_connection()
 
-    confirm = input("This will drop ALL tables. Type 'yes' to confirm: ").strip().lower()
+    confirm = input(
+        "This will DELETE all song and fingerprint data from Redis.\n"
+        "Type 'yes' to confirm: "
+    ).strip().lower()
     if confirm != "yes":
         print("Aborted.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+    deleted = 0
+    cursor  = 0
 
-        if not tables:
-            print("No tables found.")
-            return
+    # Scan and delete all keys matching our schema patterns
+    for pattern in ("song:*", "songs:counter", "fp:*"):
+        while True:
+            cursor, keys = r.scan(cursor=cursor, match=pattern, count=500)
+            if keys:
+                r.delete(*keys)
+                deleted += len(keys)
+            if cursor == 0:
+                break
+        cursor = 0  # reset cursor for next pattern
 
-        for (table,) in tables:
-            if table.startswith("sqlite_"):
-                continue
-            conn.execute(f'DROP TABLE IF EXISTS "{table}"')
-            print(f"Dropped table: {table}")
-
-        conn.commit()
-        print("\nAll tables dropped.")
-    finally:
-        conn.close()
+    print(f"\nDeleted {deleted} key(s) from Redis. Database is now empty.")
 
 
 if __name__ == "__main__":

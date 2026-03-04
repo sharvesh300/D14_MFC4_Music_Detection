@@ -12,20 +12,18 @@ Example:
 
 import os
 import sys
-import sqlite3
 from collections import defaultdict
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fingerprint import AudioFingerprinter
-from database import match_fingerprints_bulk
+from database import get_connection, match_fingerprints_bulk
 
-DB_PATH        = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
 MIN_CONFIDENCE = 0.02
 TOP_N          = 5
 
 
-def match(conn, fp, audio_path, is_phone_mode=False):
+def match(r, fp, audio_path, is_phone_mode=False):
     y, sr  = fp.preprocess(audio_path, is_phone_mode=is_phone_mode)
     S_db   = fp.generate_spectrogram(y)
     peaks  = fp.find_peaks(S_db)
@@ -41,7 +39,7 @@ def match(conn, fp, audio_path, is_phone_mode=False):
     for h, t in hashes:
         hash_to_query_times[int(h)].append(t)
 
-    db_rows = match_fingerprints_bulk(conn, hash_values)
+    db_rows = match_fingerprints_bulk(r, hash_values)
 
     votes = defaultdict(lambda: defaultdict(int))
     for hash_value, song_id, db_t in db_rows:
@@ -57,9 +55,8 @@ def match(conn, fp, audio_path, is_phone_mode=False):
     return ranked[:TOP_N], n_hashes
 
 
-def song_name_from_id(conn, song_id):
-    row = conn.execute("SELECT name FROM songs WHERE id = ?", (song_id,)).fetchone()
-    return row[0] if row else "Unknown"
+def song_name_from_id(r, song_id):
+    return r.hget(f"song:{song_id}", "name") or "Unknown"
 
 
 def main():
@@ -74,36 +71,33 @@ def main():
         print(f"File not found: {audio_path}")
         sys.exit(1)
 
-    if not os.path.isfile(DB_PATH):
-        print(f"Database not found: {DB_PATH} — run fingerprint_songs.py first.")
+    r  = get_connection()
+    if not r.exists("songs:counter"):
+        print("No songs found in Redis — run insert_songs.py and fingerprint_songs.py first.")
         sys.exit(1)
 
     print(f"Query      : {audio_path}")
     print(f"Phone mode : {'ON' if is_phone_mode else 'OFF'}")
-    print(f"DB         : {DB_PATH}\n")
+    print(f"DB         : Redis {r.connection_pool.connection_kwargs['host']}:"
+          f"{r.connection_pool.connection_kwargs['port']}\n")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA query_only = ON")
     fp = AudioFingerprinter()
 
-    ranked, n_hashes = match(conn, fp, audio_path, is_phone_mode=is_phone_mode)
+    ranked, n_hashes = match(r, fp, audio_path, is_phone_mode=is_phone_mode)
 
     print(f"Hashes generated : {n_hashes}")
     print(f"Matches found    : {len(ranked)}\n")
 
     if not ranked:
         print("No match found (confidence below threshold).")
-        conn.close()
         return
 
     print(f"  {'Rank':<6} {'Song':<35} {'Confidence':>12}")
     print(f"  {'-'*55}")
     for rank, (song_id, conf) in enumerate(ranked, start=1):
-        name   = song_name_from_id(conn, song_id)
+        name   = song_name_from_id(r, song_id)
         marker = "  <-- BEST MATCH" if rank == 1 else ""
         print(f"  {rank:<6} {name:<35} {conf:>11.4f}{marker}")
-
-    conn.close()
 
 
 if __name__ == "__main__":

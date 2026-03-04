@@ -1,6 +1,5 @@
 import sounddevice as sd
 import numpy as np
-import sqlite3
 import threading
 import queue
 import sys
@@ -11,9 +10,7 @@ from collections import defaultdict
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fingerprint import AudioFingerprinter
-from database import match_fingerprints_bulk
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
+from database import get_connection, match_fingerprints_bulk
 
 SAMPLE_RATE = 8000
 CHUNK_DURATION = 2  # seconds
@@ -54,8 +51,7 @@ def audio_producer():
 # MATCHING CONSUMER THREAD
 # ---------------------------------------------------------
 def matcher_worker():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA query_only = ON")
+    r  = get_connection()
     fp = AudioFingerprinter()
 
     while not stop_flag.is_set():
@@ -64,10 +60,10 @@ def matcher_worker():
         except queue.Empty:
             continue
 
-        best_id, conf = match_audio(conn, fp, y)
+        best_id, conf = match_audio(r, fp, y)
 
         if best_id is not None:
-            name = song_name_from_id(conn, best_id)
+            name = r.hget(f"song:{best_id}", "name") or "Unknown"
             print()
             print("=" * 50)
             print("  🎵  SONG IDENTIFIED")
@@ -79,13 +75,13 @@ def matcher_worker():
         else:
             print("...")
 
-    conn.close()
+    r.close() if hasattr(r, 'close') else None
 
 
 # ---------------------------------------------------------
 # MATCH LOGIC
 # ---------------------------------------------------------
-def match_audio(conn, fp, y):
+def match_audio(r, fp, y):
     S_db = fp.generate_spectrogram(y)
     peaks = fp.find_peaks(S_db)
     hashes = fp.generate_hashes(peaks)
@@ -99,7 +95,7 @@ def match_audio(conn, fp, y):
     for h, t in hashes:
         hash_to_query_times[int(h)].append(t)
 
-    db_rows = match_fingerprints_bulk(conn, hash_values)
+    db_rows = match_fingerprints_bulk(r, hash_values)
 
     votes = defaultdict(lambda: defaultdict(int))
     for hash_value, song_id, db_t in db_rows:
@@ -121,12 +117,6 @@ def match_audio(conn, fp, y):
     return best_id, scores[best_id]
 
 
-def song_name_from_id(conn, song_id):
-    row = conn.execute(
-        "SELECT name FROM songs WHERE id = ?",
-        (song_id,)
-    ).fetchone()
-    return row[0] if row else "Unknown"
 
 
 # ---------------------------------------------------------
@@ -145,8 +135,9 @@ def keyboard_listener():
 # MAIN
 # ---------------------------------------------------------
 def main():
-    if not os.path.isfile(DB_PATH):
-        print("Database not found.")
+    r = get_connection()
+    if not r.exists("songs:counter"):
+        print("No songs found in Redis — run insert_songs.py and fingerprint_songs.py first.")
         return
 
     print("🎤 Listening continuously...")

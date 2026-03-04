@@ -1,0 +1,29 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: music-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+  app:
+    build: .
+    container_name: music-app
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./songs:/workspace/songs        # mount local songs folder
+      - .:/workspace                    # live-reload source changes
+    # Override CMD here to run whichever script you need, e.g.:
+    #   docker compose run --rm app python scripts/fingerprint_songs.py
+    # command: ["python", "-u", "scripts/insert_songs.py"]
+
+volumes:
+  redis-data:

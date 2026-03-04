@@ -1,13 +1,11 @@
 import os
 import sys
-import sqlite3
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fingerprint import AudioFingerprinter
-from database import create_database, insert_fingerprints_bulk
+from database import get_connection, create_database, insert_fingerprints_bulk
 
-DB_PATH   = os.path.join(os.path.dirname(__file__), "..", "database", "fingerprints.db")
 SONGS_DIR = os.path.join(os.path.dirname(__file__), "..", "songs")
 
 
@@ -21,63 +19,61 @@ def find_audio_file(songs_dir, song_name):
 
 
 def main():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    create_database(DB_PATH)
+    r = get_connection()
+    create_database(r)  # no-op for Redis, kept for consistency
 
-    # Single connection for the entire run
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    n = int(r.get("songs:counter") or 0)
+    if n == 0:
+        print("No songs found in Redis. Run insert_songs.py first.")
+        return
 
-    try:
-        songs = conn.execute("SELECT id, name FROM songs ORDER BY id").fetchall()
+    # Fetch all song names in one pipeline round-trip
+    pipe = r.pipeline()
+    for i in range(1, n + 1):
+        pipe.hget(f"song:{i}", "name")
+    names = pipe.execute()
+    songs = [(i, name) for i, name in enumerate(names, start=1) if name]
 
-        if not songs:
-            print("No songs found in the database. Run insert_songs.py first.")
-            return
+    print(f"Found {len(songs)} song(s) in Redis.\n")
 
-        print(f"Found {len(songs)} song(s) in database.\n")
+    fp = AudioFingerprinter()
 
-        fp = AudioFingerprinter()
+    for song_id, song_name in songs:
+        print(f"[{song_id:>3}] {song_name}", end=" ... ")
 
-        for song_id, song_name in songs:
-            print(f"[{song_id:>3}] {song_name}", end=" ... ")
+        # Skip if already fingerprinted
+        if r.exists(f"song:{song_id}:fingerprinted"):
+            print("already fingerprinted, skipping.")
+            continue
 
-            # Pre-compute check: skip if already fingerprinted
-            already = conn.execute(
-                "SELECT 1 FROM fingerprints WHERE song_id = ? LIMIT 1", (song_id,)
-            ).fetchone()
-            if already:
-                print("already fingerprinted, skipping.")
-                continue
+        audio_path = find_audio_file(SONGS_DIR, song_name)
+        if audio_path is None:
+            print("audio file not found, skipping.")
+            continue
 
-            audio_path = find_audio_file(SONGS_DIR, song_name)
-            if audio_path is None:
-                print("audio file not found, skipping.")
-                continue
+        try:
+            # Load and preprocess the audio once (shared by both modes)
+            y_raw, sr = fp.preprocess(audio_path, is_phone_mode=False)
 
-            try:
-                # --- Normal hashes (broadband) ---
-                y, sr       = fp.preprocess(audio_path, is_phone_mode=False)
-                S_db        = fp.generate_spectrogram(y)
-                peaks       = fp.find_peaks(S_db)
-                hashes      = fp.generate_hashes(peaks)
+            # --- Normal hashes (broadband) ---
+            S_db    = fp.generate_spectrogram(y_raw)
+            peaks   = fp.find_peaks(S_db)
+            hashes  = fp.generate_hashes(peaks)
 
-                # --- Phone-mode hashes (bandpass filtered) ---
-                y_bp, sr_bp = fp.preprocess(audio_path, is_phone_mode=True)
-                S_db_bp     = fp.generate_spectrogram(y_bp)
-                peaks_bp    = fp.find_peaks(S_db_bp)
-                hashes_bp   = fp.generate_hashes(peaks_bp)
+            # --- Phone-mode hashes (apply bandpass on the already-loaded signal) ---
+            from matcher import bandpass
+            y_bp    = bandpass(y_raw, sr)
+            S_db_bp = fp.generate_spectrogram(y_bp)
+            peaks_bp  = fp.find_peaks(S_db_bp)
+            hashes_bp = fp.generate_hashes(peaks_bp)
 
-                all_hashes = hashes + hashes_bp
-                insert_fingerprints_bulk(conn, song_id, all_hashes)
-                print(f"done ({len(hashes)} normal + {len(hashes_bp)} phone-mode hashes stored).")
+            all_hashes = hashes + hashes_bp
+            insert_fingerprints_bulk(r, song_id, all_hashes)
+            r.set(f"song:{song_id}:fingerprinted", "1")
+            print(f"done ({len(hashes)} normal + {len(hashes_bp)} phone-mode hashes stored).")
 
-            except Exception as e:
-                print(f"ERROR: {e}")
-
-    finally:
-        conn.close()
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     print("\nFingerprinting complete.")
 

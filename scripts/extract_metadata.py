@@ -13,6 +13,7 @@ except ImportError:
     HAS_MUTAGEN = False
 
 import librosa
+import soundfile as sf
 
 SONGS_DIR = os.path.join(os.path.dirname(__file__), "..", "songs")
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "..", "metadata.csv")
@@ -77,17 +78,22 @@ def extract_metadata(filepath):
         except Exception as e:
             print(f"  [mutagen] Warning for {filename}: {e}")
 
-    # --- Fallback: duration via librosa if not already set ---
+    # --- Fallback: duration via header-only read (no audio decoding) ---
     if meta["duration_seconds"] is None:
         try:
-            y, sr = librosa.load(filepath, sr=None, mono=False)
-            duration = librosa.get_duration(y=y, sr=sr)
-            meta["duration_seconds"] = round(duration, 2)
-            meta["duration_formatted"] = format_duration(duration)
-            meta["sample_rate_hz"] = sr
-            meta["channels"] = y.shape[0] if y.ndim > 1 else 1
-        except Exception as e:
-            print(f"  [librosa] Warning for {filename}: {e}")
+            info = sf.info(filepath)
+            meta["duration_seconds"]   = round(info.duration, 2)
+            meta["duration_formatted"] = format_duration(info.duration)
+            meta["sample_rate_hz"]     = info.samplerate
+            meta["channels"]           = info.channels
+        except Exception:
+            # Last resort: librosa.get_duration reads only the file header
+            try:
+                duration = librosa.get_duration(path=filepath)
+                meta["duration_seconds"]   = round(duration, 2)
+                meta["duration_formatted"] = format_duration(duration)
+            except Exception as e:
+                print(f"  [duration] Warning for {filename}: {e}")
 
     return meta
 

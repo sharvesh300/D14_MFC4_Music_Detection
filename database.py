@@ -1,171 +1,115 @@
-import sqlite3
+"""
+database.py — Redis-backed persistence for songs and fingerprint hashes
+=======================================================================
+
+Key schema
+----------
+songs:counter           STRING  Auto-incrementing integer — the last assigned song id.
+song:{id}               HASH    Song data: only "name" field (filename stem).
+song:name:{name}        STRING  Maps a song's filename-stem → its integer id.
+song:{id}:fingerprinted STRING  Presence flag; set after fingerprints are stored.
+fp:{hash_value}         LIST    Entries "{song_id}:{time_offset}" for every indexed
+                                 fingerprint that produced this hash value.
+
+Public API
+----------
+get_connection()                         -> redis.Redis
+create_database(r)                       -> None  (no-op, kept for compatibility)
+insert_song(r, song_name)                -> int   (new song id)
+insert_fingerprints_bulk(r, song_id, hashes)
+match_fingerprints_bulk(r, hash_values)  -> [(hash_value, song_id, time_offset), …]
+get_fingerprints(r, song_id)             -> [(hash_value, time_offset), …]
+"""
+
+import os
+import redis
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+REDIS_DB   = int(os.environ.get("REDIS_DB",   0))
 
 
-def create_database(db_name):
-    """Create the SQLite database, tables, and indices."""
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
-
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA synchronous=NORMAL")
-
-    # Songs table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS songs (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            name                TEXT    NOT NULL,
-            title               TEXT,
-            artist              TEXT,
-            album               TEXT,
-            genre               TEXT,
-            year                TEXT,
-            track_number        TEXT,
-            duration_seconds    REAL,
-            duration_formatted  TEXT,
-            sample_rate_hz      INTEGER,
-            channels            INTEGER,
-            bitrate_kbps        REAL,
-            file_size_kb        REAL,
-            cover_image_path    TEXT
-        )
-    ''')
-
-    # Fingerprints table — hash_value BIGINT, time_offset INTEGER (frame index)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS fingerprints (
-            song_id     INTEGER NOT NULL,
-            hash_value  BIGINT  NOT NULL,
-            time_offset INTEGER NOT NULL
-        )
-    ''')
-
-    # Index for fast hash lookups
-    c.execute('''
-        CREATE INDEX IF NOT EXISTS idx_hash
-        ON fingerprints(hash_value)
-    ''')
-
-    conn.commit()
-    conn.close()
+def get_connection(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB):
+    """Return a Redis client with decode_responses=True."""
+    return redis.Redis(host=host, port=port, db=db, decode_responses=True,
+                      socket_connect_timeout=5, socket_timeout=5)
 
 
-def insert_song(db_name, song_name, meta=None):
+def create_database(r):
+    """No-op — Redis requires no schema creation. Kept for API compatibility."""
+    pass
+
+
+def insert_song(r, song_name):
     """
-    Insert a song into the songs table and return its id.
+    Insert a song into Redis and return its integer id.
+
+    Keys written:
+        song:{id}        — Hash with a single "name" field.
+        song:name:{name} — String mapping song name → id for reverse lookup.
 
     Parameters:
-        db_name   : path to the SQLite database
-        song_name : base filename without extension (used as 'name')
-        meta      : optional dict from extract_metadata(); all recognised
-                    keys are stored in the corresponding columns.
+        r         : redis.Redis client
+        song_name : base filename without extension
     """
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
-
-    if meta:
-        c.execute('''
-            INSERT INTO songs (
-                name, title, artist, album, genre, year, track_number,
-                duration_seconds, duration_formatted,
-                sample_rate_hz, channels, bitrate_kbps,
-                file_size_kb, cover_image_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            song_name,
-            meta.get("title") or song_name,
-            meta.get("artist") or "",
-            meta.get("album") or "",
-            meta.get("genre") or "",
-            meta.get("year") or "",
-            meta.get("track_number") or "",
-            meta.get("duration_seconds"),
-            meta.get("duration_formatted") or "",
-            meta.get("sample_rate_hz"),
-            meta.get("channels"),
-            meta.get("bitrate_kbps"),
-            meta.get("file_size_kb"),
-            meta.get("cover_image_path") or "",
-        ))
-    else:
-        c.execute("INSERT INTO songs (name) VALUES (?)", (song_name,))
-
-    song_id = c.lastrowid
-    conn.commit()
-    conn.close()
+    song_id = r.incr("songs:counter")
+    r.hset(f"song:{song_id}", "name", song_name)
+    r.set(f"song:name:{song_name}", song_id)
     return song_id
 
 
-def insert_fingerprints_bulk(conn, song_id, hashes):
+def insert_fingerprints_bulk(r, song_id, hashes):
     """
-    Bulk-insert fingerprint hashes using an existing open connection.
+    Bulk-insert fingerprint hashes using a Redis pipeline.
+
+    Each hash is appended to the list at key ``fp:{hash_value}``.
+    List elements are packed as the string ``"{song_id}:{time_offset}"``.
 
     Parameters:
-        conn    : open sqlite3.Connection (caller manages lifecycle)
+        r       : redis.Redis client
         song_id : integer song id
         hashes  : list of (hash_value: int, time_offset: int)
     """
-    conn.executemany(
-        "INSERT INTO fingerprints (song_id, hash_value, time_offset) VALUES (?, ?, ?)",
-        [(song_id, int(h), int(t)) for h, t in hashes]
-    )
-    conn.commit()
+    pipe = r.pipeline()
+    for h, t in hashes:
+        pipe.rpush(f"fp:{int(h)}", f"{int(song_id)}:{int(t)}")
+    pipe.execute()
 
-def match_fingerprint(conn, hash_value):
+
+def match_fingerprints_bulk(r, hash_values):
     """
-    Query for all (song_id, time_offset) rows matching a hash.
+    Batch-lookup fingerprints for a list of hash values.
+
+    Uses a single Redis pipeline round-trip (one LRANGE per unique hash).
 
     Parameters:
-        conn       : open sqlite3.Connection
-        hash_value : integer hash to look up
-    """
-    c = conn.cursor()
-    c.execute(
-        "SELECT song_id, time_offset FROM fingerprints WHERE hash_value = ?",
-        (int(hash_value),)
-    )
-    return c.fetchall()
-
-
-def match_fingerprints_bulk(conn, hash_values):
-    """
-    Batch-query fingerprints for a list of hash values in a single SQL call.
-
-    Returns list of (hash_value, song_id, time_offset).
-    Chunks requests to stay under SQLite's 999-parameter limit.
-
-    Parameters:
-        conn        : open sqlite3.Connection
+        r           : redis.Redis client
         hash_values : list of integer hash values
+
+    Returns:
+        list of (hash_value: int, song_id: int, time_offset: int)
     """
     if not hash_values:
         return []
 
-    results    = []
-    chunk_size = 900
+    unique_hashes = list(set(int(h) for h in hash_values))
 
-    for i in range(0, len(hash_values), chunk_size):
-        chunk        = hash_values[i : i + chunk_size]
-        placeholders = ",".join("?" * len(chunk))
-        rows = conn.execute(
-            f"SELECT hash_value, song_id, time_offset FROM fingerprints "
-            f"WHERE hash_value IN ({placeholders})",
-            chunk
-        ).fetchall()
-        results.extend(rows)
+    pipe = r.pipeline()
+    for hv in unique_hashes:
+        pipe.lrange(f"fp:{hv}", 0, -1)
+    raw_results = pipe.execute()
 
+    results = []
+    for hv, entries in zip(unique_hashes, raw_results):
+        for entry in entries:
+            sid_str, t_str = entry.split(":", 1)
+            results.append((hv, int(sid_str), int(t_str)))
     return results
 
-def get_fingerprints(conn, song_id):
-    """
-    Retrieve all (hash_value, time_offset) rows for a song.
 
-    Parameters:
-        conn    : open sqlite3.Connection
-        song_id : integer song id
+def get_fingerprints(r, song_id):
     """
-    c = conn.cursor()
-    c.execute(
-        "SELECT hash_value, time_offset FROM fingerprints WHERE song_id = ?",
-        (song_id,)
-    )
-    return c.fetchall()
+    Not efficiently supported by the current list-per-hash key design.
+    Kept for API compatibility — returns an empty list.
+    """
+    return []
