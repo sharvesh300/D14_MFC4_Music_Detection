@@ -12,8 +12,21 @@ def create_database(db_name):
     # Songs table
     c.execute('''
         CREATE TABLE IF NOT EXISTS songs (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT    NOT NULL
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT    NOT NULL,
+            title               TEXT,
+            artist              TEXT,
+            album               TEXT,
+            genre               TEXT,
+            year                TEXT,
+            track_number        TEXT,
+            duration_seconds    REAL,
+            duration_formatted  TEXT,
+            sample_rate_hz      INTEGER,
+            channels            INTEGER,
+            bitrate_kbps        REAL,
+            file_size_kb        REAL,
+            cover_image_path    TEXT
         )
     ''')
 
@@ -36,19 +49,49 @@ def create_database(db_name):
     conn.close()
 
 
-def insert_song(db_name, song_name):
-    """Insert a song into the songs table and return its id."""
+def insert_song(db_name, song_name, meta=None):
+    """
+    Insert a song into the songs table and return its id.
+
+    Parameters:
+        db_name   : path to the SQLite database
+        song_name : base filename without extension (used as 'name')
+        meta      : optional dict from extract_metadata(); all recognised
+                    keys are stored in the corresponding columns.
+    """
     conn = sqlite3.connect(db_name)
     c = conn.cursor()
 
-    c.execute('''
-        INSERT INTO songs (name) VALUES (?)
-    ''', (song_name,))
-    song_id = c.lastrowid
+    if meta:
+        c.execute('''
+            INSERT INTO songs (
+                name, title, artist, album, genre, year, track_number,
+                duration_seconds, duration_formatted,
+                sample_rate_hz, channels, bitrate_kbps,
+                file_size_kb, cover_image_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            song_name,
+            meta.get("title") or song_name,
+            meta.get("artist") or "",
+            meta.get("album") or "",
+            meta.get("genre") or "",
+            meta.get("year") or "",
+            meta.get("track_number") or "",
+            meta.get("duration_seconds"),
+            meta.get("duration_formatted") or "",
+            meta.get("sample_rate_hz"),
+            meta.get("channels"),
+            meta.get("bitrate_kbps"),
+            meta.get("file_size_kb"),
+            meta.get("cover_image_path") or "",
+        ))
+    else:
+        c.execute("INSERT INTO songs (name) VALUES (?)", (song_name,))
 
+    song_id = c.lastrowid
     conn.commit()
     conn.close()
-
     return song_id
 
 

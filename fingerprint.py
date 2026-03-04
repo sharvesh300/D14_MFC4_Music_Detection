@@ -1,3 +1,51 @@
+"""
+fingerprint.py — Audio Fingerprinting Engine
+=============================================
+
+Provides the ``AudioFingerprinter`` class, which converts a raw audio file
+into a compact set of 64-bit landmark hashes that can be stored in or
+queried against the SQLite fingerprint database.
+
+Pipeline (per audio file)
+--------------------------
+1. ``preprocess(file_path, is_phone_mode)``
+       Load audio, convert to mono, resample to 8 kHz, normalise amplitude,
+       remove DC offset, apply pre-emphasis.  When ``is_phone_mode=True``,
+       also applies a 300–3400 Hz Butterworth bandpass via ``matcher.bandpass``
+       to simulate telephone / GSM channel conditions.
+
+2. ``generate_spectrogram(y)``
+       Short-Time Fourier Transform (STFT) → magnitude → log dB scaling.
+
+3. ``find_peaks(S_db)``
+       Detect dominant spectral landmarks with a 20×20 maximum filter,
+       keeping only the top 15th-percentile amplitude peaks per time frame.
+
+4. ``generate_hashes(peaks)``
+       Pair each anchor peak with up to ``fan_value`` target peaks in a
+       forward time window (the "constellation map") and pack
+       ``(f1, f2, Δt)`` into a single 64-bit integer.
+       Returns ``[(hash_value, time_offset), ...]``.
+
+5. ``tune_parameters(...)``  (static)
+       Grid-search over fan_value, delta_t_max, freq_bin_size, and
+       min_confidence to maximise match accuracy on a labelled probe set.
+
+Usage
+-----
+    from fingerprint import AudioFingerprinter
+
+    fp     = AudioFingerprinter()
+    y, sr  = fp.preprocess("songs/track.mp3")
+    S_db   = fp.generate_spectrogram(y)
+    peaks  = fp.find_peaks(S_db)
+    hashes = fp.generate_hashes(peaks)   # store (indexing) or query (matching)
+
+Dependencies
+------------
+    librosa, numpy, scipy.ndimage, matcher.bandpass
+"""
+
 import librosa
 import numpy as np
 from scipy.ndimage import maximum_filter

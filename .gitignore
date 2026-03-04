@@ -9,6 +9,7 @@ songs/
 *.pyd
 *.swp
 database/fingerprints.db
+database/
 database/fingerprints.db-journal
 database/fingerprints.db-wal
 database/fingerprints.db-shm
