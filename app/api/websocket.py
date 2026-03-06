@@ -6,106 +6,119 @@ WebSocket /ws/stream
 
 Protocol
 --------
-Client → Server : raw PCM bytes, 16-bit signed little-endian, mono, 8 kHz.
-                  Each message = one audio chunk (CHUNK_DURATION seconds worth).
+Client → Server : raw PCM bytes, float32 little-endian, mono, 8 kHz.
+                  Each message = one audio packet (PACKET_DURATION seconds worth).
 
-Server → Client : JSON messages:
-    {"matched": true,  "name": "...", "confidence": 0.23,
-     "start_time": "14:05:01", "end_time": "14:05:03", "duration": "00:02"}
+Server → Client : JSON messages, sent once per detection window step:
+    {"matched": true,  "name": "...", "confidence": 0.23, "timestamp": "14:05:01"}
     {"matched": false}
 """
 
+import asyncio
 import time
-from collections import defaultdict
 
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.config import MIN_CONFIDENCE, SAMPLE_RATE
+from app.config import MIN_CONFIDENCE, SAMPLE_RATE, WINDOW_SIZE
+from app.core.buffer import RingBuffer
 from app.core.fingerprint import AudioFingerprinter
+from app.core.matcher import fingerprint_only, score_matches
 from app.db.fingerprint_repo import match_fingerprints_bulk
 from app.db.redis import get_connection
+from app.utils.logging import get_logger
 
 ws_router = APIRouter()
 
-_fp = AudioFingerprinter()   # shared, stateless
-
-
-def _match_chunk(r, y: np.ndarray) -> dict:
-    S_db   = _fp.generate_spectrogram(y)
-    peaks  = _fp.find_peaks(S_db)
-    hashes = _fp.generate_hashes(peaks)
-
-    if not hashes:
-        return {"matched": False}
-
-    hash_values         = [int(h) for h, _ in hashes]
-    hash_to_query_times = defaultdict(list)
-    for h, t in hashes:
-        hash_to_query_times[int(h)].append(t)
-
-    db_rows = match_fingerprints_bulk(r, hash_values)
-
-    votes: dict = defaultdict(lambda: defaultdict(int))
-    for hash_value, song_id, db_t in db_rows:
-        for query_t in hash_to_query_times[hash_value]:
-            votes[song_id][db_t - query_t] += 1
-
-    scores = {
-        sid: max(buckets.values()) / len(hashes)
-        for sid, buckets in votes.items()
-    }
-    scores = {sid: s for sid, s in scores.items() if s >= MIN_CONFIDENCE}
-
-    if not scores:
-        return {"matched": False}
-
-    best_id   = max(scores, key=scores.get)
-    best_conf = scores[best_id]
-    name      = r.hget(f"song:{best_id}", "name") or "Unknown"
-
-    return {"matched": True, "song_id": best_id, "name": name, "confidence": round(best_conf, 4)}
+_fp    = AudioFingerprinter()
+logger = get_logger(__name__)
+logger.setLevel(10)  # DEBUG
 
 
 @ws_router.websocket("/ws/stream")
 async def stream_audio(websocket: WebSocket):
-    """
-    Accept raw PCM chunks over WebSocket and return real-time match results.
-    """
     await websocket.accept()
-    r = get_connection()
+    logger.info("WebSocket connection accepted from %s", websocket.client)
+    r    = get_connection()
+    buf  = RingBuffer()
+    loop = asyncio.get_event_loop()
 
-    current_song_id: int | None   = None
-    song_start_time: float | None = None
+    chunk_count  = 0
+    window_count = 0
 
     try:
         while True:
-            raw = await websocket.receive_bytes()
+            data = await websocket.receive_bytes()
+            chunk_count += 1
+            pcm = np.frombuffer(data, dtype=np.float32)
+            buf.extend(pcm)
 
-            # Convert raw bytes (int16 LE) to float32 in [-1, 1]
-            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            logger.debug(
+                "[chunk %d] %d bytes | %d samples | buffer=%d/%d",
+                chunk_count, len(data), len(pcm), buf.buffered, WINDOW_SIZE,
+            )
 
-            chunk_received = time.time()
-            result = _match_chunk(r, pcm)
+            for window in buf.windows():
+                window_count += 1
+                logger.debug(
+                    "[window %d] fingerprinting %d samples (%.2f s)",
+                    window_count, WINDOW_SIZE, WINDOW_SIZE / SAMPLE_RATE,
+                )
 
-            if result["matched"]:
-                song_id = result["song_id"]
-                if song_id != current_song_id:
-                    current_song_id = song_id
-                    song_start_time = chunk_received
+                # CPU fingerprinting — off event loop
+                hashes, hash_to_query_times = await loop.run_in_executor(
+                    None, fingerprint_only, _fp, window
+                )
 
-                end_wall   = time.time()
-                duration_s = end_wall - song_start_time
-                await websocket.send_json({
-                    **result,
-                    "start_time": time.strftime("%H:%M:%S", time.localtime(song_start_time)),
-                    "end_time":   time.strftime("%H:%M:%S", time.localtime(end_wall)),
-                    "duration":   f"{int(duration_s // 60):02d}:{int(duration_s % 60):02d}",
-                })
-            else:
-                current_song_id = None
-                song_start_time = None
+                if not hashes:
+                    logger.debug("[window %d] no hashes generated", window_count)
+                    await websocket.send_json({"matched": False})
+                    continue
+
+                # Redis lookup — sync client in executor
+                hash_values = [int(h) for h, _ in hashes]
+                db_rows     = await loop.run_in_executor(
+                    None, match_fingerprints_bulk, r, hash_values
+                )
+
+                # CPU scoring — fast, no I/O
+                best_id, confidence, offset_bins = score_matches(hashes, hash_to_query_times, db_rows)
+                # Convert spectrogram frames → seconds: frames × hop_length / sample_rate
+                offset_s = round(offset_bins * _fp.hop_length / _fp.sample_rate, 2)
+
+                logger.info(
+                    "[window %d] best_id=%s confidence=%s offset=%.2fs threshold=%s",
+                    window_count, best_id, confidence, offset_s, MIN_CONFIDENCE,
+                )
+
+                if best_id and confidence >= MIN_CONFIDENCE:
+                    raw_name  = r.hget(f"song:{best_id}", "name")
+                    song_name = raw_name.decode() if isinstance(raw_name, bytes) else (raw_name or "Unknown")
+                    logger.info(
+                        "[window %d] MATCH — song_id=%s name=%r confidence=%.4f offset=%.2fs",
+                        window_count, best_id, song_name, confidence, offset_s,
+                    )
+                    await websocket.send_json({
+                        "matched":    True,
+                        "name":       song_name,
+                        "confidence": round(confidence, 4),
+                        "offset_s":   offset_s,
+                        "timestamp":  time.strftime("%H:%M:%S"),
+                    })
+                    await websocket.close()
+                    return
+
                 await websocket.send_json({"matched": False})
 
     except WebSocketDisconnect:
-        pass
+        logger.info("Client disconnected — chunks=%d windows=%d", chunk_count, window_count)
+    except Exception as exc:
+        logger.exception("[chunk %d] Unhandled error: %s", chunk_count, exc)
+        try:
+            await websocket.send_json({"matched": False, "error": str(exc)})
+        except Exception:
+            pass
+
+
+
+
