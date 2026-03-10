@@ -50,3 +50,21 @@ check_untyped_defs = true
 no_implicit_reexport = true
 warn_redundant_casts = true
 warn_unused_ignores = true # Ensures that there are only effective type ignores
+
+[[tool.mypy.overrides]]
+module = [
+    "sounddevice",
+    "librosa",
+    "librosa.*",
+    "soundfile",
+    "scipy",
+    "scipy.*",
+    "websocket",
+    "uvicorn",
+    "uvicorn.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["redis", "redis.*"]
+follow_imports = "skip"

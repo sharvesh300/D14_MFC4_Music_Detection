@@ -12,15 +12,17 @@ fp:{hash_value}         LIST     Entries "{song_id}:{time_offset}" for every ind
                                   fingerprint that produced this hash value.
 """
 
-import redis
+from typing import Any
+
+from redis import Redis
 
 
-def create_database(r: redis.Redis) -> None:
+def create_database(r: Redis[Any]) -> None:
     """No-op — Redis requires no schema creation. Kept for API compatibility."""
     pass
 
 
-def insert_song(r: redis.Redis, song_name: str) -> int:
+def insert_song(r: Redis[Any], song_name: str) -> int:
     """
     Register a new song and return its integer id.
 
@@ -28,13 +30,15 @@ def insert_song(r: redis.Redis, song_name: str) -> int:
         song:{id}        — Hash with a single "name" field.
         song:name:{name} — Reverse lookup: name → id.
     """
-    song_id = r.incr("songs:counter")
+    song_id = int(r.incr("songs:counter"))
     r.hset(f"song:{song_id}", "name", song_name)
-    r.set(f"song:name:{song_name}", song_id)
+    r.set(f"song:name:{song_name}", str(song_id))
     return song_id
 
 
-def insert_fingerprints_bulk(r: redis.Redis, song_id: int, hashes: list) -> None:
+def insert_fingerprints_bulk(
+    r: Redis[Any], song_id: int, hashes: list[tuple[int, int]]
+) -> None:
     """
     Bulk-insert fingerprint hashes into Redis using a pipeline.
 
@@ -47,7 +51,9 @@ def insert_fingerprints_bulk(r: redis.Redis, song_id: int, hashes: list) -> None
     pipe.execute()
 
 
-def match_fingerprints_bulk(r: redis.Redis, hash_values: list) -> list:
+def match_fingerprints_bulk(
+    r: Redis[Any], hash_values: list[int]
+) -> list[tuple[int, int, int]]:
     """
     Batch-lookup fingerprints for a list of hash values.
 
@@ -74,7 +80,7 @@ def match_fingerprints_bulk(r: redis.Redis, hash_values: list) -> list:
     return results
 
 
-def get_all_songs(r: redis.Redis) -> list:
+def get_all_songs(r: Redis[Any]) -> list[tuple[int, str]]:
     """
     Return a list of (song_id, song_name) for every registered song.
     Uses a single pipeline round-trip.
@@ -91,5 +97,5 @@ def get_all_songs(r: redis.Redis) -> list:
     return [(i, name) for i, name in enumerate(names, start=1) if name]
 
 
-def song_name_from_id(r: redis.Redis, song_id: int) -> str:
-    return r.hget(f"song:{song_id}", "name") or "Unknown"
+def song_name_from_id(r: Redis[Any], song_id: int) -> str:
+    return str(r.hget(f"song:{song_id}", "name") or "Unknown")

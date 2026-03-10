@@ -19,12 +19,12 @@ from app.db.redis import get_connection
 from app.services.recognition_service import match
 
 
-def main():
+def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: python scripts/match_song.py <path_to_audio_file> [--phone-mode]")
         sys.exit(1)
 
-    audio_path    = sys.argv[1]
+    audio_path = sys.argv[1]
     is_phone_mode = "--phone-mode" in sys.argv
 
     if not os.path.isfile(audio_path):
@@ -33,13 +33,15 @@ def main():
 
     r = get_connection()
     if not r.exists("songs:counter"):
-        print("No songs found in Redis — run insert_songs.py and fingerprint_songs.py first.")
+        print(
+            "No songs found in Redis — run insert_songs.py and fingerprint_songs.py first."
+        )
         sys.exit(1)
 
     print(f"Query      : {audio_path}")
     print(f"Phone mode : {'ON' if is_phone_mode else 'OFF'}\n")
 
-    fp       = AudioFingerprinter()
+    fp = AudioFingerprinter()
     response = match(r, fp, audio_path, is_phone_mode=is_phone_mode)
 
     print(f"Hashes generated : {response.n_hashes}")

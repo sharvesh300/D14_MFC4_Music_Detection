@@ -35,20 +35,22 @@ Pipeline (per audio file)
 import librosa
 import numpy as np
 from scipy.ndimage import maximum_filter
+from typing import Any, Callable
 
 from app.core.matcher import bandpass
 
 
 class AudioFingerprinter:
-
     def __init__(self, sample_rate: int = 8000):
         self.sample_rate = sample_rate
-        self.n_fft       = 1024
-        self.hop_length  = 256
-        self.fan_value   = 10
+        self.n_fft = 1024
+        self.hop_length = 256
+        self.fan_value = 10
         self.target_zone_time = 50
 
-    def preprocess(self, file_path: str, is_phone_mode: bool = False):
+    def preprocess(
+        self, file_path: str, is_phone_mode: bool = False
+    ) -> tuple[np.ndarray, int]:
         """
         Load audio and standardise it.
 
@@ -66,9 +68,9 @@ class AudioFingerprinter:
         y = librosa.effects.preemphasis(y)
 
         if is_phone_mode:
-            y = bandpass(y, sr)
+            y = bandpass(y, int(sr))
 
-        return y, sr
+        return y, int(sr)
 
     def generate_spectrogram(self, y: np.ndarray) -> np.ndarray:
         """
@@ -77,11 +79,13 @@ class AudioFingerprinter:
         Returns:
             S_db -> log-scaled magnitude spectrogram (np.ndarray)
         """
-        S    = librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)
-        S_db = librosa.amplitude_to_db(np.abs(S), ref=np.max)
+        S = librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length)
+        S_db = np.asarray(librosa.amplitude_to_db(np.abs(S), ref=np.max))
         return S_db
 
-    def find_peaks(self, S_db: np.ndarray, amp_min: float = -50) -> list:
+    def find_peaks(
+        self, S_db: np.ndarray, amp_min: float = -50
+    ) -> list[tuple[int, int]]:
         """
         Detect spectral peaks from a log-magnitude spectrogram.
 
@@ -92,39 +96,45 @@ class AudioFingerprinter:
             S_db    : log-magnitude spectrogram
             amp_min : minimum amplitude (dB) threshold
         """
-        local_max    = maximum_filter(S_db, size=(20, 20))
-        detected     = S_db == local_max
-        peaks_mask   = detected & (S_db > amp_min)
+        local_max = maximum_filter(S_db, size=(20, 20))
+        detected = S_db == local_max
+        peaks_mask = detected & (S_db > amp_min)
         freq_idx, time_idx = np.where(peaks_mask)
-        return list(zip(freq_idx, time_idx))
+        return [(int(f), int(t)) for f, t in zip(freq_idx, time_idx)]
 
     @staticmethod
-    def _make_hash(f1_bin: int, f2_bin: int, delta_t: int, freq_bin_size: int = 5):
+    def _make_hash(
+        f1_bin: int, f2_bin: int, delta_t: int, freq_bin_size: int = 5
+    ) -> int | None:
         """
         Pack two frequency bins and a time delta into a single 64-bit hash.
 
         Layout: [f1 coarsened][f2 coarsened][Δt/2] using fixed bit widths.
         Returns the hash integer, or None if any field overflows.
         """
-        f1_coarse    = f1_bin // freq_bin_size
-        f2_coarse    = f2_bin // freq_bin_size
-        delta_t_bin  = delta_t // 2
+        f1_coarse = f1_bin // freq_bin_size
+        f2_coarse = f2_bin // freq_bin_size
+        delta_t_bin = delta_t // 2
 
         if f1_coarse >= 65536 or f2_coarse >= 65536 or delta_t_bin >= 65536:
             return None
 
-        FREQ_BITS  = 9
+        FREQ_BITS = 9
         DELTA_BITS = 8
-        return (f1_coarse << (FREQ_BITS + DELTA_BITS)) | (f2_coarse << DELTA_BITS) | delta_t_bin
+        return (
+            (f1_coarse << (FREQ_BITS + DELTA_BITS))
+            | (f2_coarse << DELTA_BITS)
+            | delta_t_bin
+        )
 
     def generate_hashes(
         self,
-        peaks: list,
-        fan_value: int   = 10,
+        peaks: list[tuple[int, int]],
+        fan_value: int = 5,
         delta_t_min: int = 1,
         delta_t_max: int = 200,
         freq_bin_size: int = 10,
-    ) -> list:
+    ) -> list[tuple[int, int]]:
         """
         Industry-style 64-bit landmark hashing with Target Zones (Shazam-style).
 
@@ -135,15 +145,15 @@ class AudioFingerprinter:
             return []
 
         peaks_sorted = sorted(peaks, key=lambda x: x[1])
-        hashes       = []
-        total_peaks  = len(peaks_sorted)
+        hashes = []
+        total_peaks = len(peaks_sorted)
 
         for i in range(total_peaks):
-            f1, t1      = peaks_sorted[i]
+            f1, t1 = peaks_sorted[i]
             valid_pairs = 0
 
             for j in range(1, total_peaks - i):
-                f2, t2  = peaks_sorted[i + j]
+                f2, t2 = peaks_sorted[i + j]
                 delta_t = t2 - t1
 
                 if delta_t < delta_t_min:
@@ -163,15 +173,15 @@ class AudioFingerprinter:
 
     @staticmethod
     def tune_parameters(
-        audio_paths_and_labels: list,
-        match_fn,
-        fan_values:           tuple = (5, 10, 15, 20),
-        delta_t_max_values:   tuple = (100, 200, 300),
-        freq_bin_size_values: tuple = (5, 10),
-        min_confidence_values: tuple = (0.01, 0.02, 0.05),
+        audio_paths_and_labels: list[tuple[str, str]],
+        match_fn: Callable[..., Any],
+        fan_values: tuple[int, ...] = (5, 10, 15, 20),
+        delta_t_max_values: tuple[int, ...] = (100, 200, 300),
+        freq_bin_size_values: tuple[int, ...] = (5, 10),
+        min_confidence_values: tuple[float, ...] = (0.01, 0.02, 0.05),
         sample_rate: int = 8000,
         verbose: bool = True,
-    ):
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """
         Grid-search over fan_value, delta_t_max, freq_bin_size, and
         min_confidence to maximise Top-1 accuracy on a labelled probe set.
@@ -191,13 +201,22 @@ class AudioFingerprinter:
         """
         import itertools
 
-        grid = list(itertools.product(
-            fan_values, delta_t_max_values, freq_bin_size_values, min_confidence_values,
-        ))
+        grid = list(
+            itertools.product(
+                fan_values,
+                delta_t_max_values,
+                freq_bin_size_values,
+                min_confidence_values,
+            )
+        )
 
         if verbose:
-            print(f"\nParameter tuning: {len(grid)} combinations × {len(audio_paths_and_labels)} probes")
-            print(f"{'fan':>5} {'dt_max':>7} {'fbsz':>6} {'min_conf':>9}  {'Top-1':>7}  {'Top-3':>7}")
+            print(
+                f"\nParameter tuning: {len(grid)} combinations × {len(audio_paths_and_labels)} probes"
+            )
+            print(
+                f"{'fan':>5} {'dt_max':>7} {'fbsz':>6} {'min_conf':>9}  {'Top-1':>7}  {'Top-3':>7}"
+            )
             print("-" * 60)
 
         all_results = []
@@ -208,9 +227,9 @@ class AudioFingerprinter:
 
             for audio_path, expected in audio_paths_and_labels:
                 try:
-                    y, _   = fp.preprocess(audio_path)
-                    S_db   = fp.generate_spectrogram(y)
-                    peaks  = fp.find_peaks(S_db)
+                    y, _ = fp.preprocess(audio_path)
+                    S_db = fp.generate_spectrogram(y)
+                    peaks = fp.find_peaks(S_db)
                     hashes = fp.generate_hashes(
                         peaks,
                         fan_value=fan_value,
@@ -235,13 +254,13 @@ class AudioFingerprinter:
             top3_acc = top3 / total if total else 0.0
 
             result = {
-                "fan_value":      fan_value,
-                "delta_t_max":    delta_t_max,
-                "freq_bin_size":  freq_bin_size,
+                "fan_value": fan_value,
+                "delta_t_max": delta_t_max,
+                "freq_bin_size": freq_bin_size,
                 "min_confidence": min_conf,
-                "top1_acc":       top1_acc,
-                "top3_acc":       top3_acc,
-                "total":          total,
+                "top1_acc": top1_acc,
+                "top3_acc": top3_acc,
+                "total": total,
             }
             all_results.append(result)
 

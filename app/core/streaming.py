@@ -21,19 +21,29 @@ WebSocket API endpoint:
 import threading
 import queue
 import time
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
 
 from app.config import SAMPLE_RATE, CHUNK_DURATION
-from app.core.matcher import match_audio, matcher_worker, start_matcher_worker
+from app.core.matcher import (
+    match_audio as match_audio,
+    matcher_worker as matcher_worker,
+    start_matcher_worker as start_matcher_worker,
+)
 
 
 # ---------------------------------------------------------------------------
 # Audio producer
 # ---------------------------------------------------------------------------
 
-def audio_producer(audio_queue: queue.Queue, stop_flag: threading.Event) -> None:
+
+def audio_producer(
+    audio_queue: queue.Queue[tuple[np.ndarray, float]],
+    stop_flag: threading.Event,
+    device: int | None = None,
+) -> None:
     """
     Capture microphone input and push ``(chunk, timestamp)`` onto *audio_queue*.
 
@@ -41,13 +51,19 @@ def audio_producer(audio_queue: queue.Queue, stop_flag: threading.Event) -> None
     relative time (``time_info.inputBufferAdcTime``) to the wall-clock instant
     captured just before the InputStream opens.  This gives true audio-hardware
     timing rather than Python scheduling delays.
+
+    Parameters
+    ----------
+    device : int or None
+        sounddevice device index to use as input.  ``None`` uses the system
+        default (equivalent to ``--mic system``).
     """
     blocksize = int(SAMPLE_RATE * CHUNK_DURATION)
 
-    def callback(indata, frames, time_info, status):
+    def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if stop_flag.is_set():
             raise sd.CallbackStop()
-        chunk       = indata[:, 0].copy()
+        chunk = indata[:, 0].copy()
         chunk_start = stream_open_wall_time + time_info.inputBufferAdcTime
         try:
             audio_queue.put_nowait((chunk, chunk_start))
@@ -59,13 +75,11 @@ def audio_producer(audio_queue: queue.Queue, stop_flag: threading.Event) -> None
         samplerate=SAMPLE_RATE,
         channels=1,
         blocksize=blocksize,
+        device=device,
         callback=callback,
     ):
         while not stop_flag.is_set():
             sd.sleep(100)
-
-
-
 
 
 # ---------------------------------------------------------------------------

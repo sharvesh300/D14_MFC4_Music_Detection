@@ -8,6 +8,8 @@ function used by both the REST API and CLI scripts.
 
 from collections import defaultdict
 
+from typing import Any
+
 import redis
 
 from app.config import MIN_CONFIDENCE
@@ -17,7 +19,7 @@ from app.models.response import MatchResponse, MatchResult
 
 
 def match(
-    r: redis.Redis,
+    r: redis.Redis[Any],
     fp: AudioFingerprinter,
     audio_path: str,
     is_phone_mode: bool = False,
@@ -38,31 +40,28 @@ def match(
     Returns:
         MatchResponse with a ranked list of MatchResult objects.
     """
-    y, _   = fp.preprocess(audio_path, is_phone_mode=is_phone_mode)
-    S_db   = fp.generate_spectrogram(y)
-    peaks  = fp.find_peaks(S_db)
+    y, _ = fp.preprocess(audio_path, is_phone_mode=is_phone_mode)
+    S_db = fp.generate_spectrogram(y)
+    peaks = fp.find_peaks(S_db)
     hashes = fp.generate_hashes(peaks)
 
     n_hashes = len(hashes)
     if n_hashes == 0:
         return MatchResponse(query_path=audio_path, n_hashes=0, matched=False)
 
-    hash_values         = [int(h) for h, _ in hashes]
+    hash_values = [int(h) for h, _ in hashes]
     hash_to_query_times = defaultdict(list)
     for h, t in hashes:
         hash_to_query_times[int(h)].append(t)
 
     db_rows = match_fingerprints_bulk(r, hash_values)
 
-    votes: dict = defaultdict(lambda: defaultdict(int))
+    votes: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     for hash_value, song_id, db_t in db_rows:
         for query_t in hash_to_query_times[hash_value]:
             votes[song_id][db_t - query_t] += 1
 
-    scores = {
-        sid: max(buckets.values()) / n_hashes
-        for sid, buckets in votes.items()
-    }
+    scores = {sid: max(buckets.values()) / n_hashes for sid, buckets in votes.items()}
     scores = {sid: s for sid, s in scores.items() if s >= min_confidence}
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
 

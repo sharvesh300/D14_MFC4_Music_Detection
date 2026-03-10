@@ -9,12 +9,6 @@ bandpass(y, sr, low=300, high=3400) -> np.ndarray
     ``AudioFingerprinter`` when ``is_phone_mode=True`` to simulate telephone
     / GSM channel conditions.
 
-match_sample(r, sample_hashes) -> (song_id, best_offset, best_score)
-    Low-level Redis lookup + offset-alignment voting.
-    Batch-queries ``fp:{hash}`` lists in one pipeline round-trip and returns
-    the (song_id, offset_bucket, vote_count) triple for the histogram peak.
-    Returns ``(None, None, 0)`` on no match.
-
 fingerprint_only(fp, y) -> (hashes, hash_to_query_times)
     Pure-CPU step: STFT → peaks → 64-bit landmark hashes.
     No Redis I/O — safe to run in a thread executor alongside async code.
@@ -51,6 +45,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from typing import Any, Callable
 
 import numpy as np
 from scipy.signal import butter, lfilter
@@ -60,67 +55,12 @@ def bandpass(y: np.ndarray, sr: int, low: int = 300, high: int = 3400) -> np.nda
     """4th-order Butterworth bandpass filter (300–3400 Hz by default)."""
     nyq = sr / 2
     b, a = butter(4, [low / nyq, high / nyq], btype="band")
-    return lfilter(b, a, y)
+    return np.asarray(lfilter(b, a, y))
 
 
-def match_sample(r, sample_hashes: list) -> tuple:
-    """
-    Match sample hashes against the Redis fingerprint store.
-
-    Uses a pipeline to fetch all fp:{hash} lists in one round-trip, then
-    performs offset-alignment voting to find the best matching song.
-
-    Parameters:
-        r             : redis.Redis client (decode_responses=True)
-        sample_hashes : list of (hash_value: int, time_offset: int)
-
-    Returns:
-        (best_song_id, best_offset, best_score)
-        All three are None / 0 when no fingerprints matched.
-    """
-    if not sample_hashes:
-        return None, None, 0
-
-    sample_time_map: dict = defaultdict(list)
-    for h, t in sample_hashes:
-        sample_time_map[int(h)].append(t)
-
-    unique_hashes = list(sample_time_map.keys())
-
-    # Single pipeline round-trip
-    pipe = r.pipeline()
-    for hv in unique_hashes:
-        pipe.lrange(f"fp:{hv}", 0, -1)
-    raw_results = pipe.execute()
-
-    votes: dict = defaultdict(lambda: defaultdict(int))
-    for hv, entries in zip(unique_hashes, raw_results):
-        for entry in entries:
-            sid_str, t_str = entry.split(":", 1)
-            song_id = int(sid_str)
-            db_time = int(t_str)
-            for sample_time in sample_time_map[hv]:
-                delta = int((db_time - sample_time) / 2)
-                votes[song_id][delta] += 1
-
-    if not votes:
-        return None, None, 0
-
-    best_song_id = None
-    best_offset  = None
-    best_score   = 0
-
-    for song_id, delta_map in votes.items():
-        local_offset, local_score = max(delta_map.items(), key=lambda x: x[1])
-        if local_score > best_score:
-            best_score   = local_score
-            best_song_id = song_id
-            best_offset  = local_offset
-
-    return best_song_id, best_offset, best_score
-
-
-def fingerprint_only(fp, y) -> tuple:
+def fingerprint_only(
+    fp: Any, y: np.ndarray
+) -> tuple[list[tuple[int, int]], dict[int, list[int]]]:
     """
     Pure-CPU step: spectrogram → peaks → hashes.
 
@@ -129,10 +69,9 @@ def fingerprint_only(fp, y) -> tuple:
         hashes               : list of (hash_value: int, time_offset: int)
         hash_to_query_times  : dict[int, list[int]]
     """
-    from collections import defaultdict
 
-    S_db   = fp.generate_spectrogram(y)
-    peaks  = fp.find_peaks(S_db)
+    S_db = fp.generate_spectrogram(y)
+    peaks = fp.find_peaks(S_db)
     hashes = fp.generate_hashes(peaks)
 
     if not hashes:
@@ -145,7 +84,11 @@ def fingerprint_only(fp, y) -> tuple:
     return hashes, hash_to_query_times
 
 
-def score_matches(hashes, hash_to_query_times, db_rows) -> tuple:
+def score_matches(
+    hashes: list[tuple[int, int]],
+    hash_to_query_times: dict[int, list[int]],
+    db_rows: list[tuple[int, int, int]],
+) -> tuple[int | None, float, int]:
     """
     Vote-and-score step (pure CPU, no I/O).
 
@@ -161,28 +104,26 @@ def score_matches(hashes, hash_to_query_times, db_rows) -> tuple:
             offset_s = best_offset_bins * hop_length / sample_rate
         e.g. hop_length=256, sample_rate=8000 → multiply by 0.032.
     """
-    from collections import defaultdict
     from app.config import MIN_CONFIDENCE
 
     if not hashes or not db_rows:
         return None, 0.0, 0
 
-    votes: dict = defaultdict(lambda: defaultdict(int))
+    votes: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     for hash_value, song_id, db_t in db_rows:
         for query_t in hash_to_query_times.get(hash_value, []):
             votes[song_id][db_t - query_t] += 1
 
     scores = {
-        sid: max(buckets.values()) / len(hashes)
-        for sid, buckets in votes.items()
+        sid: max(buckets.values()) / len(hashes) for sid, buckets in votes.items()
     }
     scores = {sid: s for sid, s in scores.items() if s >= MIN_CONFIDENCE}
 
     if not scores:
         return None, 0.0, 0
 
-    best_id          = max(scores, key=scores.get)
-    best_offset_bins = max(votes[best_id], key=votes[best_id].get)
+    best_id = max(scores, key=lambda k: scores[k])
+    best_offset_bins = max(votes[best_id], key=lambda k: votes[best_id][k])
     return best_id, scores[best_id], best_offset_bins
 
 
@@ -210,12 +151,14 @@ class ConsensusVoter:
     """
 
     def __init__(self, threshold: int = 3) -> None:
-        self.threshold  = threshold
-        self._counts:   dict[int, int]   = {}   # song_id → vote count
-        self._conf_sum: dict[int, float] = {}   # song_id → sum of confidences
-        self._offset:   dict[int, int]   = {}   # song_id → latest offset_bins
+        self.threshold = threshold
+        self._counts: dict[int, int] = {}  # song_id → vote count
+        self._conf_sum: dict[int, float] = {}  # song_id → sum of confidences
+        self._offset: dict[int, int] = {}  # song_id → latest offset_bins
 
-    def vote(self, best_id, confidence: float, offset_bins: int) -> tuple:
+    def vote(
+        self, best_id: int | None, confidence: float, offset_bins: int
+    ) -> tuple[int | None, float, int]:
         """
         Register a single detection result and return a confirmed match once
         the vote threshold is reached.
@@ -234,9 +177,9 @@ class ConsensusVoter:
         if best_id is None:
             return None, 0.0, 0
 
-        self._counts[best_id]    = self._counts.get(best_id, 0) + 1
-        self._conf_sum[best_id]  = self._conf_sum.get(best_id, 0.0) + confidence
-        self._offset[best_id]    = offset_bins
+        self._counts[best_id] = self._counts.get(best_id, 0) + 1
+        self._conf_sum[best_id] = self._conf_sum.get(best_id, 0.0) + confidence
+        self._offset[best_id] = offset_bins
 
         if self._counts[best_id] >= self.threshold:
             avg_conf = self._conf_sum[best_id] / self._counts[best_id]
@@ -278,20 +221,20 @@ class SongTracker:
     """
 
     def __init__(self, hold_time: float = 4.0) -> None:
-        self.hold_time     = hold_time
-        self.current_id:   int | None  = None
-        self.current_name: str | None  = None
-        self.current_off_s: float      = 0.0
-        self._last_seen:   float       = 0.0
+        self.hold_time = hold_time
+        self.current_id: int | None = None
+        self.current_name: str | None = None
+        self.current_off_s: float = 0.0
+        self._last_seen: float = 0.0
 
     def update(
         self,
-        confirmed_id,
+        confirmed_id: int | None,
         confirmed_conf: float,
-        offset_s:       float,
-        name:           str | None = None,
-        now:            float | None = None,
-    ) -> tuple:
+        offset_s: float,
+        name: str | None = None,
+        now: float | None = None,
+    ) -> tuple[int | None, str | None, float, float]:
         """
         Advance the tracker with the latest consensus result.
 
@@ -309,6 +252,7 @@ class SongTracker:
         active_id is None when no song is active (no hit and hold expired).
         """
         import time as _time
+
         if now is None:
             now = _time.time()
 
@@ -317,30 +261,40 @@ class SongTracker:
             if self.current_id != confirmed_id:
                 # Different song: lock in offset from this first confirming window
                 self.current_off_s = offset_s
-            self.current_id   = confirmed_id
+            self.current_id = confirmed_id
             self.current_name = name if name is not None else self.current_name
-            self._last_seen   = now
-            return self.current_id, self.current_name, confirmed_conf, self.current_off_s
+            self._last_seen = now
+            return (
+                self.current_id,
+                self.current_name,
+                confirmed_conf,
+                self.current_off_s,
+            )
 
         if self.current_id is not None and (now - self._last_seen < self.hold_time):
             # No new hit but within hold window — keep the existing song alive
-            return self.current_id, self.current_name, confirmed_conf, self.current_off_s
+            return (
+                self.current_id,
+                self.current_name,
+                confirmed_conf,
+                self.current_off_s,
+            )
 
         # Hold expired or never set — nothing active
-        self.current_id    = None
-        self.current_name  = None
+        self.current_id = None
+        self.current_name = None
         self.current_off_s = 0.0
         return None, None, 0.0, 0.0
 
     def reset(self) -> None:
         """Clear tracked state."""
-        self.current_id    = None
-        self.current_name  = None
+        self.current_id = None
+        self.current_name = None
         self.current_off_s = 0.0
-        self._last_seen    = 0.0
+        self._last_seen = 0.0
 
 
-def match_audio(r, fp, y) -> tuple:
+def match_audio(r: Any, fp: Any, y: np.ndarray) -> tuple[int | None, float, int]:
     """
     Fingerprint one audio chunk and return the best matching song.
 
@@ -354,15 +308,15 @@ def match_audio(r, fp, y) -> tuple:
         return None, 0.0, 0
 
     hash_values = [int(h) for h, _ in hashes]
-    db_rows     = match_fingerprints_bulk(r, hash_values)
+    db_rows = match_fingerprints_bulk(r, hash_values)
     return score_matches(hashes, hash_to_query_times, db_rows)
 
 
 def matcher_worker(
-    audio_queue: queue.Queue,
-    stop_flag:   threading.Event,
-    on_match=None,
-    on_no_match=None,
+    audio_queue: queue.Queue[Any],
+    stop_flag: threading.Event,
+    on_match: Callable[[dict[str, Any]], None] | None = None,
+    on_no_match: Callable[[], None] | None = None,
 ) -> None:
     """
     Consume audio chunks, run match_audio, and invoke result callbacks.
@@ -377,10 +331,10 @@ def matcher_worker(
     from app.core.fingerprint import AudioFingerprinter
     from app.db.redis import get_connection
 
-    r  = get_connection()
+    r = get_connection()
     fp = AudioFingerprinter()
 
-    current_song_id: int | None   = None
+    current_song_id: int | None = None
     song_start_time: float | None = None
 
     while not stop_flag.is_set():
@@ -389,7 +343,10 @@ def matcher_worker(
         except queue.Empty:
             continue
 
+        _t0 = time.time()
         best_id, conf, offset_bins = match_audio(r, fp, y)
+        match_time = time.time() - _t0
+        print(f"match_time = {match_time:.3f}s")
         offset_s = round(offset_bins * fp.hop_length / fp.sample_rate, 2)
 
         if best_id is not None:
@@ -399,18 +356,20 @@ def matcher_worker(
                 current_song_id = best_id
                 song_start_time = chunk_start
 
-            end_wall   = time.time()
+            end_wall = chunk_start + offset_s
             duration_s = end_wall - song_start_time
 
             if on_match:
-                on_match({
-                    "name":       name,
-                    "confidence": conf,
-                    "offset_s":   offset_s,
-                    "start_time": song_start_time,
-                    "end_time":   end_wall,
-                    "duration_s": duration_s,
-                })
+                on_match(
+                    {
+                        "name": name,
+                        "confidence": conf,
+                        "offset_s": offset_s,
+                        "start_time": song_start_time,
+                        "end_time": end_wall,
+                        "duration_s": duration_s,
+                    }
+                )
         else:
             current_song_id = None
             song_start_time = None
@@ -422,10 +381,10 @@ def matcher_worker(
 
 
 def start_matcher_worker(
-    audio_queue: queue.Queue,
-    stop_flag:   threading.Event,
-    on_match=None,
-    on_no_match=None,
+    audio_queue: queue.Queue[Any],
+    stop_flag: threading.Event,
+    on_match: Callable[[dict[str, Any]], None] | None = None,
+    on_no_match: Callable[[], None] | None = None,
 ) -> threading.Thread:
     """
     Start matcher_worker in a daemon thread and return the Thread object.

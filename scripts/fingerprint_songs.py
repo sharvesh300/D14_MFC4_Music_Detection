@@ -10,7 +10,7 @@ from app.db.fingerprint_repo import create_database, get_all_songs
 from app.services.fingerprint_service import fingerprint_song
 
 
-def main():
+def main() -> None:
     r = get_connection()
     create_database(r)
 
@@ -39,10 +39,6 @@ def main():
             print(f"done ({n} normal + {p} phone-mode hashes stored).")
 
     print("\nFingerprinting complete.")
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":

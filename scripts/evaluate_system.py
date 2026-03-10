@@ -16,13 +16,13 @@ Usage:
 
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.config import SAMPLES_DIR, SAMPLES_NOISY_DIR
 from app.core.fingerprint import AudioFingerprinter
 from app.db.redis import get_connection
-from app.db.fingerprint_repo import song_name_from_id
 from app.services.recognition_service import match
 
 NOISE_LEVELS = ["light", "medium", "heavy"]
@@ -39,8 +39,18 @@ def expected_name_from_filename(filename: str) -> str:
     return parts[0] if len(parts) == 2 else base
 
 
-def evaluate_folder(r, fp, folder: str, label: str, file_list=None) -> dict:
-    files = sorted(file_list) if file_list is not None else sorted(f for f in os.listdir(folder) if f.endswith((".wav", ".mp3")))
+def evaluate_folder(
+    r: Any,
+    fp: Any,
+    folder: str,
+    label: str,
+    file_list: list[str] | None = None,
+) -> dict[str, Any]:
+    files = (
+        sorted(file_list)
+        if file_list is not None
+        else sorted(f for f in os.listdir(folder) if f.endswith((".wav", ".mp3")))
+    )
 
     if not files:
         print(f"  No files found in {folder}\n")
@@ -57,8 +67,8 @@ def evaluate_folder(r, fp, folder: str, label: str, file_list=None) -> dict:
 
     for filename in files:
         audio_path = os.path.join(folder, filename)
-        expected   = expected_name_from_filename(filename)
-        total     += 1
+        expected = expected_name_from_filename(filename)
+        total += 1
 
         try:
             response = match(r, fp, audio_path, top_n=3, min_confidence=0.02)
@@ -73,8 +83,8 @@ def evaluate_folder(r, fp, folder: str, label: str, file_list=None) -> dict:
             continue
 
         top1_result = response.results[0]
-        predicted   = top1_result.song_name
-        top3_names  = [m.song_name for m in response.results]
+        predicted = top1_result.song_name
+        top3_names = [m.song_name for m in response.results]
 
         is_top1 = predicted == expected
         is_top3 = expected in top3_names
@@ -91,27 +101,37 @@ def evaluate_folder(r, fp, folder: str, label: str, file_list=None) -> dict:
         if is_top3:
             top3 += 1
 
-        print(f"  {filename:<50} {expected:<28} {predicted:<28} {top1_result.confidence:>6.3f}  {status}")
+        print(
+            f"  {filename:<50} {expected:<28} {predicted:<28} {top1_result.confidence:>6.3f}  {status}"
+        )
 
     print(f"\n  Total    : {total}")
     print(f"  Top-1    : {top1} ({100*top1/total:.1f}%)")
     print(f"  Top-3    : {top3} ({100*top3/total:.1f}%)")
     print(f"  No match : {no_match}")
     if wrong:
-        print(f"\n  Mismatches:")
+        print("\n  Mismatches:")
         for fname, exp, pred, score in wrong:
             print(f"    {fname}  →  expected '{exp}', got '{pred}' (score {score:.4f})")
 
-    return {"label": label, "total": total, "top1": top1, "top3": top3, "no_match": no_match}
+    return {
+        "label": label,
+        "total": total,
+        "top1": top1,
+        "top3": top3,
+        "no_match": no_match,
+    }
 
 
-def main():
+def main() -> None:
     r = get_connection()
     if not r.exists("songs:counter"):
-        print("No songs found in Redis — run insert_songs.py and fingerprint_songs.py first.")
+        print(
+            "No songs found in Redis — run insert_songs.py and fingerprint_songs.py first."
+        )
         return
 
-    fp      = AudioFingerprinter()
+    fp = AudioFingerprinter()
     results = []
 
     if os.path.isdir(SAMPLES_DIR):
@@ -121,11 +141,19 @@ def main():
 
     if os.path.isdir(SAMPLES_NOISY_DIR):
         for level in NOISE_LEVELS:
-            level_files = [f for f in os.listdir(SAMPLES_NOISY_DIR) if f.endswith(f"_{level}.wav")]
+            level_files = [
+                f for f in os.listdir(SAMPLES_NOISY_DIR) if f.endswith(f"_{level}.wav")
+            ]
             if not level_files:
                 continue
 
-            ev = evaluate_folder(r, fp, SAMPLES_NOISY_DIR, f"NOISY SAMPLES — {level.upper()}", file_list=level_files)
+            ev = evaluate_folder(
+                r,
+                fp,
+                SAMPLES_NOISY_DIR,
+                f"NOISY SAMPLES — {level.upper()}",
+                file_list=level_files,
+            )
             if ev:
                 results.append(ev)
 
@@ -138,7 +166,9 @@ def main():
         print(f"  {'-'*58}")
         for ev in results:
             t = ev["total"]
-            print(f"  {ev['label']:<40} {100*ev['top1']/t:>6.1f}%  {100*ev['top3']/t:>6.1f}%")
+            print(
+                f"  {ev['label']:<40} {100*ev['top1']/t:>6.1f}%  {100*ev['top3']/t:>6.1f}%"
+            )
 
 
 if __name__ == "__main__":

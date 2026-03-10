@@ -23,4 +23,4 @@ repos:
           - fastapi
           - numpy
           - redis
-          - types-redis
+          - websocket-client

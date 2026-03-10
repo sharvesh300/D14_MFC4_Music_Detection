@@ -43,8 +43,8 @@ RingBuffer
     this file needs editing — websocket.py is unaffected.
 """
 
-
 import numpy as np
+from typing import Generator
 
 from app.config import WINDOW_SIZE, STEP_SIZE
 
@@ -68,15 +68,15 @@ class RingBuffer:
     def __init__(
         self,
         window_size: int = WINDOW_SIZE,
-        step_size:   int = STEP_SIZE,
+        step_size: int = STEP_SIZE,
         capacity_multiplier: int = 4,
     ) -> None:
         self.window_size = window_size
-        self.step_size   = step_size
-        self._cap        = window_size * capacity_multiplier
-        self._buf        = np.zeros(self._cap, dtype=np.float32)
-        self._write      = 0   # next write position
-        self._read       = 0   # start of oldest unprocessed sample
+        self.step_size = step_size
+        self._cap = window_size * capacity_multiplier
+        self._buf = np.zeros(self._cap, dtype=np.float32)
+        self._write = 0  # next write position
+        self._read = 0  # start of oldest unprocessed sample
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,14 +98,14 @@ class RingBuffer:
         n = len(pcm)
         if self._write + n > self._cap:
             live = self.buffered
-            self._buf[:live] = self._buf[self._read:self._write]
+            self._buf[:live] = self._buf[self._read : self._write]
             self._write = live
-            self._read  = 0
+            self._read = 0
 
-        self._buf[self._write:self._write + n] = pcm
+        self._buf[self._write : self._write + n] = pcm
         self._write += n
 
-    def windows(self):
+    def windows(self) -> Generator[np.ndarray, None, None]:
         """
         Yield every ready window as a zero-copy numpy view, advancing by
         *step_size* samples after each one.
@@ -119,10 +119,10 @@ class RingBuffer:
             For read-only processing (fingerprinting) the view is sufficient.
         """
         while self.buffered >= self.window_size:
-            yield self._buf[self._read:self._read + self.window_size]
+            yield self._buf[self._read : self._read + self.window_size]
             self._read += self.step_size
 
     def reset(self) -> None:
         """Discard all buffered samples (e.g. after a connection closes)."""
         self._write = 0
-        self._read  = 0
+        self._read = 0

@@ -7,6 +7,7 @@ function used by the CLI indexing scripts.
 """
 
 import redis
+from typing import Any
 
 from app.core.fingerprint import AudioFingerprinter
 from app.core.matcher import bandpass
@@ -15,12 +16,12 @@ from app.utils.audio import find_audio_file
 
 
 def fingerprint_song(
-    r: redis.Redis,
+    r: redis.Redis[Any],
     song_id: int,
     song_name: str,
     songs_dir: str,
     fp: AudioFingerprinter | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """
     Compute and store fingerprint hashes for a single song.
 
@@ -53,26 +54,31 @@ def fingerprint_song(
         y_raw, sr = fp.preprocess(audio_path, is_phone_mode=False)
 
         # Broadband hashes
-        S_db      = fp.generate_spectrogram(y_raw)
-        peaks     = fp.find_peaks(S_db)
-        hashes    = fp.generate_hashes(peaks)
+        S_db = fp.generate_spectrogram(y_raw)
+        peaks = fp.find_peaks(S_db)
+        hashes = fp.generate_hashes(peaks)
 
         # Phone-mode hashes — bandpass on the already-loaded signal, no re-read
-        y_bp       = bandpass(y_raw, sr)
-        S_db_bp    = fp.generate_spectrogram(y_bp)
-        peaks_bp   = fp.find_peaks(S_db_bp)
-        hashes_bp  = fp.generate_hashes(peaks_bp)
+        y_bp = bandpass(y_raw, sr)
+        S_db_bp = fp.generate_spectrogram(y_bp)
+        peaks_bp = fp.find_peaks(S_db_bp)
+        hashes_bp = fp.generate_hashes(peaks_bp)
 
         insert_fingerprints_bulk(r, song_id, hashes + hashes_bp)
         r.set(f"song:{song_id}:fingerprinted", "1")
 
         return {
-            "status":        "done",
-            "song_id":       song_id,
-            "song_name":     song_name,
+            "status": "done",
+            "song_id": song_id,
+            "song_name": song_name,
             "normal_hashes": len(hashes),
-            "phone_hashes":  len(hashes_bp),
+            "phone_hashes": len(hashes_bp),
         }
 
     except Exception as exc:
-        return {"status": "error", "song_id": song_id, "song_name": song_name, "error": str(exc)}
+        return {
+            "status": "error",
+            "song_id": song_id,
+            "song_name": song_name,
+            "error": str(exc),
+        }

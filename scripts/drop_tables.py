@@ -6,19 +6,23 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from app.db.redis import get_connection
 
 
-def main():
+def main() -> None:
     r = get_connection()
 
-    confirm = input(
-        "This will DELETE all song and fingerprint data from Redis.\n"
-        "Type 'yes' to confirm: "
-    ).strip().lower()
+    confirm = (
+        input(
+            "This will DELETE all song and fingerprint data from Redis.\n"
+            "Type 'yes' to confirm: "
+        )
+        .strip()
+        .lower()
+    )
     if confirm != "yes":
         print("Aborted.")
         return
 
     deleted = 0
-    cursor  = 0
+    cursor = 0
 
     # Scan and delete all keys matching our schema patterns
     for pattern in ("song:*", "songs:counter", "fp:*"):

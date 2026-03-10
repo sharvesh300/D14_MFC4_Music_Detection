@@ -9,7 +9,7 @@ from app.db.fingerprint_repo import create_database, insert_song
 from app.utils.audio import list_audio_files
 
 
-def main():
+def main() -> None:
     r = get_connection()
     create_database(r)
 
