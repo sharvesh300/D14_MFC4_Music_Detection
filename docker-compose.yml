@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
 
   redis:
@@ -8,7 +10,7 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory-policy allkeys-lru
 
   app:
     build: .
@@ -18,57 +20,51 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     volumes:
-      - ./data:/workspace/data
       - .:/workspace
+      - ./data:/workspace/data
 
-  # One-shot service: register song names in Redis
-  # Usage: docker compose run --rm insert
   insert:
     build: .
     depends_on:
       - redis
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     volumes:
-      - ./data:/workspace/data
       - .:/workspace
-    command: python scripts/insert_songs.py
+      - ./data:/workspace/data
+    command: uv run python scripts/insert_songs.py
     profiles:
       - tools
 
-  # One-shot service: compute and store fingerprint hashes
-  # Usage: docker compose run --rm fingerprint
   fingerprint:
     build: .
     depends_on:
       - redis
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     volumes:
-      - ./data:/workspace/data
       - .:/workspace
-    command: python scripts/fingerprint_songs.py
+      - ./data:/workspace/data
+    command: uv run python scripts/fingerprint_songs.py
     profiles:
       - tools
 
-  # One-shot service: run evaluation against samples
-  # Usage: docker compose run --rm evaluate
   evaluate:
     build: .
     depends_on:
       - redis
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     volumes:
-      - ./data:/workspace/data
       - .:/workspace
-    command: python scripts/evaluate_system.py
+      - ./data:/workspace/data
+    command: uv run python scripts/evaluate_system.py
     profiles:
       - tools
 

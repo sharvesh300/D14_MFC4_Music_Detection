@@ -16,6 +16,8 @@ dependencies = [
     "scipy>=1.12.0",
     "python-multipart>=0.0.9",
     "websocket-client>=1.7.0",
+    "mypy>=1.19.1",
+    "ruff>=0.15.5",
 ]
 
 [project.scripts]
@@ -25,9 +27,26 @@ client   = "scripts.client:stream"
 [tool.uv]
 package = true
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app", "scripts"]
 
 [build-system]
 requires      = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.mypy]
+python_version = "3.11" # Specify the target Python version
+strict = true # Enables all optional error checking flags
+warn_return_any = true # Warns when a function returns a value with type Any
+warn_unused_configs = true # Warns about unused config sections
+disallow_untyped_defs = true # Requires annotations for all function definitions
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_reexport = true
+warn_redundant_casts = true
+warn_unused_ignores = true # Ensures that there are only effective type ignores
