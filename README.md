@@ -9,6 +9,7 @@ A real-time Python implementation of Shazam-style audio fingerprinting. Identifi
 - [Project Structure](#-project-structure)
 - [Quick Start](#-quick-start)
 - [System Architecture](#-system-architecture)
+  - [Diagrams](#diagrams)
 - [Real-Time Streaming Pipeline](#-real-time-streaming-pipeline)
 - [Scripts Reference](#-scripts-reference)
 - [Configuration](#-configuration)
@@ -154,6 +155,53 @@ uv run client
 
 ## 🏗️ System Architecture
 
+### Diagrams
+
+Both diagrams are generated from checked-in specs under [`docs/`](docs/) and carry the
+real constants from `app/config.py` and `app/core/`. The PNGs below are static exports;
+the `.html` files are self-contained interactive viewers (search, focus, relationship
+tracing, guided walkthroughs, light/dark, PNG/SVG export) that open straight in a browser.
+
+**High-level architecture** — components, boundaries, and the three request paths.
+Interactive: [`docs/high-level-architecture.html`](docs/high-level-architecture.html)
+
+![High-level architecture](docs/images/high-level-architecture.png)
+
+- **Live streaming path** — Mic Client → WebSocket API → RingBuffer → AudioFingerprinter → Matcher → Redis
+- **File upload path** — HTTP Client → REST API → Recognition Service → Redis
+- **Offline indexing** — `data/songs` → Fingerprint Service → Redis (two passes per song: broadband + 300–3400 Hz phone band)
+- `rust_dsp` is shown dashed: an optional PyO3 accelerator for STFT and hash generation
+- Everything inside the dashed boundary runs under `docker compose` (`music-app` + `music-redis`)
+
+**Low-level window pipeline** — what happens to a single 1.2 s window, lane by lane.
+Interactive: [`docs/low-level-pipeline.html`](docs/low-level-pipeline.html)
+
+![Low-level window pipeline](docs/images/low-level-pipeline.png)
+
+Every box carries its governing constant, so the diagram doubles as a tuning reference:
+packet `4000 smp / 0.5 s` → buffer `win 9600 · step 2400` → STFT `n_fft 1024 · hop 256`
+→ peaks `20 × 20 · ≥ −50 dB` → hashes `fan 5 · Δt 1–200 · 26 bit` → `LRANGE fp:{hash}`
+→ voting `bucket ÷ n_hashes` → confirm `3 windows · hold 4.0 s`.
+
+<details>
+<summary>Regenerating the diagrams</summary>
+
+The specs are `docs/high-level.architecture.json` and `docs/low-level.workflow.json`.
+They are rendered with [archify](https://github.com/tt-a1i/archify):
+
+```bash
+archify deliver architecture docs/high-level.architecture.json docs/high-level-architecture.html \
+  --quality showcase --repo-root .
+archify deliver workflow docs/low-level.workflow.json docs/low-level-pipeline.html \
+  --quality showcase
+```
+
+The architecture spec pins source-file references to a commit, so `--repo-root` is
+required and the pinned revision in `meta.repository` must be updated when those line
+ranges move. The PNGs under `docs/images/` are screenshots of the rendered HTML.
+
+</details>
+
 ### Core Modules
 
 | Module | Responsibility |
@@ -176,7 +224,7 @@ uv run client
   AudioFingerprinter     preprocess → spectrogram → peaks → hashes
         │
         ▼
-  Redis                  LPUSH fp:{hash_value} "{song_id}:{time_offset}"
+  Redis                  RPUSH fp:{hash_value} "{song_id}:{time_offset}"
 
 
  REAL-TIME STREAMING (per connection)

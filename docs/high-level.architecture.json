@@ -1,0 +1,461 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Music Detection — High-Level Architecture",
+    "output": "docs/high-level-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1215,
+      690
+    ],
+    "repository": {
+      "url": "https://github.com/sharvesh300/D14_MFC4_Music_Detection",
+      "revision": "9eb3756c0c074037b5879a18637c93bb239d2962"
+    },
+    "views": [
+      {
+        "id": "streaming-path",
+        "label": "Live streaming path",
+        "focus": [
+          "mic",
+          "ws",
+          "ringbuf",
+          "fpengine",
+          "matcher",
+          "redis"
+        ],
+        "note": "Microphone PCM to a confirmed match over one WebSocket connection."
+      },
+      {
+        "id": "rest-path",
+        "label": "File upload path",
+        "focus": [
+          "httpc",
+          "rest",
+          "recog",
+          "fpengine",
+          "redis"
+        ],
+        "note": "One-shot recognition of an uploaded audio file via POST /api/match."
+      },
+      {
+        "id": "indexing",
+        "label": "Offline indexing",
+        "focus": [
+          "songs",
+          "indexer",
+          "redis"
+        ],
+        "note": "How the fingerprint store is populated before any query can match."
+      }
+    ],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "external": {
+          "label": "Client / audio files"
+        },
+        "backend": {
+          "label": "Application service"
+        },
+        "database": {
+          "label": "Redis fingerprint store"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "rustdsp",
+      "type": "backend",
+      "label": "rust_dsp",
+      "sublabel": "PyO3 · native STFT",
+      "tag": "stft_spectrogram + generate_hashes",
+      "pos": [
+        880,
+        40
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "rust_dsp/src/lib.rs",
+          "line": 1,
+          "end_line": 110
+        }
+      ]
+    },
+    {
+      "id": "mic",
+      "type": "external",
+      "label": "Mic Client",
+      "sublabel": "8 kHz · int16 · 0.5 s",
+      "tag": "4000 samples = 8000 bytes",
+      "pos": [
+        40,
+        170
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "scripts/client.py",
+          "line": 20,
+          "end_line": 60
+        }
+      ]
+    },
+    {
+      "id": "ws",
+      "type": "backend",
+      "label": "WebSocket API",
+      "sublabel": "/ws/stream · 30 s max",
+      "tag": "MAX_STREAM_TIME 30 s",
+      "pos": [
+        320,
+        170
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/api/websocket.py",
+          "line": 88,
+          "end_line": 200
+        }
+      ]
+    },
+    {
+      "id": "ringbuf",
+      "type": "backend",
+      "label": "RingBuffer",
+      "sublabel": "win 9600 · step 2400",
+      "tag": "capacity 38 400 samples",
+      "pos": [
+        600,
+        170
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/core/buffer.py",
+          "line": 68,
+          "end_line": 128
+        }
+      ]
+    },
+    {
+      "id": "fpengine",
+      "type": "backend",
+      "label": "AudioFingerprinter",
+      "sublabel": "n_fft 1024 · hop 256",
+      "tag": "513 bins · 32 ms per frame",
+      "pos": [
+        880,
+        170
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/core/fingerprint.py",
+          "line": 44,
+          "end_line": 172
+        }
+      ]
+    },
+    {
+      "id": "matcher",
+      "type": "backend",
+      "label": "Matcher",
+      "sublabel": "≥ 0.10 · 3 win · 4.0 s",
+      "tag": "score, consensus, hold",
+      "pos": [
+        880,
+        350
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/core/matcher.py",
+          "line": 87,
+          "end_line": 294
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis 7",
+      "sublabel": "fp:{hash} :6379",
+      "tag": "AOF · allkeys-lru",
+      "pos": [
+        880,
+        530
+      ],
+      "size": [
+        180,
+        84
+      ],
+      "sources": [
+        {
+          "path": "app/db/fingerprint_repo.py",
+          "line": 20,
+          "end_line": 100
+        }
+      ]
+    },
+    {
+      "id": "httpc",
+      "type": "external",
+      "label": "HTTP Client",
+      "sublabel": "mp3 · wav · flac · ogg",
+      "tag": "POST /api/match",
+      "pos": [
+        40,
+        350
+      ],
+      "size": [
+        180,
+        74
+      ]
+    },
+    {
+      "id": "rest",
+      "type": "backend",
+      "label": "REST API",
+      "sublabel": "FastAPI :8000",
+      "tag": "/match · /songs · /health",
+      "pos": [
+        320,
+        350
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/api/routes.py",
+          "line": 26,
+          "end_line": 83
+        }
+      ]
+    },
+    {
+      "id": "recog",
+      "type": "backend",
+      "label": "Recognition Service",
+      "sublabel": "top_n 5 · conf ≥ 0.10",
+      "tag": "ranked MatchResult list",
+      "pos": [
+        600,
+        350
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/services/recognition_service.py",
+          "line": 20,
+          "end_line": 80
+        }
+      ]
+    },
+    {
+      "id": "songs",
+      "type": "external",
+      "label": "data/songs",
+      "sublabel": "reference library",
+      "tag": "data/songs",
+      "pos": [
+        40,
+        530
+      ],
+      "size": [
+        180,
+        74
+      ]
+    },
+    {
+      "id": "indexer",
+      "type": "backend",
+      "label": "Fingerprint Service",
+      "sublabel": "2 passes: full + phone",
+      "tag": "broadband + 300–3400 Hz",
+      "pos": [
+        320,
+        530
+      ],
+      "size": [
+        180,
+        74
+      ],
+      "sources": [
+        {
+          "path": "app/services/fingerprint_service.py",
+          "line": 18,
+          "end_line": 80
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "docker compose — music-app + music-redis",
+      "wraps": [
+        "ws",
+        "ringbuf",
+        "fpengine",
+        "matcher",
+        "redis",
+        "rest",
+        "recog",
+        "indexer",
+        "rustdsp"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "mic-stream",
+      "from": "mic",
+      "to": "ws",
+      "label": "8000 B / 0.5 s",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ws-buffer",
+      "from": "ws",
+      "to": "ringbuf",
+      "label": "÷ 32768",
+      "variant": "emphasis"
+    },
+    {
+      "id": "buffer-windows",
+      "from": "ringbuf",
+      "to": "fpengine",
+      "label": "1.2 s @ 0.3 s",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hashes-to-matcher",
+      "from": "fpengine",
+      "to": "matcher",
+      "label": "64-bit hashes",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        970,
+        263
+      ]
+    },
+    {
+      "id": "matcher-lookup",
+      "from": "matcher",
+      "to": "redis",
+      "label": "LRANGE",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        970,
+        477
+      ]
+    },
+    {
+      "id": "rust-accel",
+      "from": "rustdsp",
+      "to": "fpengine",
+      "label": "accelerator",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        970,
+        137
+      ]
+    },
+    {
+      "id": "upload",
+      "from": "httpc",
+      "to": "rest",
+      "label": "POST /match"
+    },
+    {
+      "id": "rest-service",
+      "from": "rest",
+      "to": "recog",
+      "label": "300–3400 Hz"
+    },
+    {
+      "id": "recog-fp",
+      "from": "recog",
+      "to": "fpengine",
+      "label": "fingerprint file"
+    },
+    {
+      "id": "recog-lookup",
+      "from": "recog",
+      "to": "redis",
+      "label": "batch lookup"
+    },
+    {
+      "id": "load-songs",
+      "from": "songs",
+      "to": "indexer",
+      "label": "load @ 8 kHz"
+    },
+    {
+      "id": "index-write",
+      "from": "indexer",
+      "to": "redis",
+      "label": "RPUSH fp:{hash}",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Live streaming path",
+      "items": [
+        "0.5 s packets of 4000 int16 samples (8000 bytes) at 8 kHz",
+        "RingBuffer holds 38 400 samples, emits a 1.2 s window every 0.3 s"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Fingerprint + store",
+      "items": [
+        "STFT n_fft 1024 / hop 256 → 513 bins, 32 ms per frame",
+        "fp:{hash} is a Redis list of \"{song_id}:{time_offset}\" entries"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Match thresholds",
+      "items": [
+        "MIN_CONFIDENCE 0.10 · ConsensusVoter 3 windows · SongTracker hold 4.0 s",
+        "No confirmation within 30 s closes the socket with a timeout reply"
+      ]
+    }
+  ]
+}

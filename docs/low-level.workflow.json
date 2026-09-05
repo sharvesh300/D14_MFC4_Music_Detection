@@ -1,0 +1,241 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Music Detection — Low-Level Window Pipeline",
+    "output": "docs/low-level-pipeline.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "frontend": {
+          "label": "Client audio"
+        },
+        "backend": {
+          "label": "Pipeline stage"
+        },
+        "database": {
+          "label": "Redis store"
+        },
+        "security": {
+          "label": "Threshold gate"
+        }
+      }
+    },
+    "views": [
+      {
+        "id": "buffering",
+        "label": "Packet to window",
+        "focus": [
+          "packet",
+          "ringbuf"
+        ],
+        "note": "How 0.5 s packets become overlapping 1.2 s analysis windows."
+      },
+      {
+        "id": "fingerprinting",
+        "label": "Fingerprint stage",
+        "focus": [
+          "stft",
+          "peaks",
+          "hashes"
+        ],
+        "note": "Spectrogram, peak picking and 26-bit landmark packing with their constants."
+      },
+      {
+        "id": "decision",
+        "label": "Decision ladder",
+        "focus": [
+          "redis",
+          "votes",
+          "confirm"
+        ],
+        "note": "The thresholds a candidate must clear before a match is emitted."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "ingest",
+      "label": "Stream Ingest — /ws/stream"
+    },
+    {
+      "id": "dsp",
+      "label": "Fingerprint — thread executor"
+    },
+    {
+      "id": "store",
+      "label": "Redis Lookup + Voting"
+    },
+    {
+      "id": "decide",
+      "label": "Match Decision"
+    }
+  ],
+  "mainPath": [
+    "packet",
+    "ringbuf",
+    "stft",
+    "peaks",
+    "hashes",
+    "redis",
+    "votes",
+    "confirm"
+  ],
+  "nodes": [
+    {
+      "id": "packet",
+      "lane": "ingest",
+      "col": 0,
+      "type": "frontend",
+      "label": "PCM Packet",
+      "sublabel": "4000 smp · 0.5 s · 8 kHz",
+      "tag": "8000 bytes, int16 LE",
+      "width": 128
+    },
+    {
+      "id": "ringbuf",
+      "lane": "ingest",
+      "col": 1,
+      "type": "backend",
+      "label": "RingBuffer",
+      "sublabel": "win 9600 · step 2400",
+      "tag": "capacity 4 × 9600 = 38 400",
+      "width": 128
+    },
+    {
+      "id": "stft",
+      "lane": "dsp",
+      "col": 2,
+      "type": "backend",
+      "label": "STFT + log dB",
+      "sublabel": "n_fft 1024 · hop 256",
+      "tag": "513 bins · 32 ms per frame",
+      "width": 128
+    },
+    {
+      "id": "peaks",
+      "lane": "dsp",
+      "col": 3,
+      "type": "backend",
+      "label": "Peak Picking",
+      "sublabel": "20 × 20 · ≥ −50 dB",
+      "tag": "scipy maximum_filter",
+      "width": 128
+    },
+    {
+      "id": "hashes",
+      "lane": "dsp",
+      "col": 4,
+      "type": "backend",
+      "label": "Landmark Hash",
+      "sublabel": "fan 5 · Δt 1–200 · 26 bit",
+      "tag": "f1 << 17 | f2 << 8 | Δt÷2",
+      "width": 128
+    },
+    {
+      "id": "redis",
+      "lane": "store",
+      "col": 4,
+      "type": "database",
+      "label": "Redis Lookup",
+      "sublabel": "LRANGE fp:{hash}",
+      "tag": "one pipeline round-trip",
+      "width": 128
+    },
+    {
+      "id": "votes",
+      "lane": "store",
+      "col": 5,
+      "type": "backend",
+      "label": "Offset Voting",
+      "sublabel": "bucket ÷ n_hashes",
+      "tag": "votes on db_t − query_t",
+      "width": 128
+    },
+    {
+      "id": "confirm",
+      "lane": "decide",
+      "col": 5,
+      "type": "security",
+      "label": "Confirm + Hold",
+      "sublabel": "3 windows · hold 4.0 s",
+      "tag": "ConsensusVoter → SongTracker",
+      "width": 128
+    }
+  ],
+  "edges": [
+    {
+      "id": "to-buffer",
+      "from": "packet",
+      "to": "ringbuf",
+      "label": "÷ 32768",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-stft",
+      "from": "ringbuf",
+      "to": "stft",
+      "label": "1.2 s window",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-peaks",
+      "from": "stft",
+      "to": "peaks",
+      "label": "513 bins",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-hashes",
+      "from": "peaks",
+      "to": "hashes",
+      "label": "peak pairs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-redis",
+      "from": "hashes",
+      "to": "redis",
+      "label": "64-bit keys",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-votes",
+      "from": "redis",
+      "to": "votes",
+      "label": "id : offset",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-confirm",
+      "from": "votes",
+      "to": "confirm",
+      "label": "score ≥ 0.10",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Timing",
+      "items": [
+        "8 kHz · packet 0.5 s = 4000 smp · window 9600 (1.2 s) · step 2400 (0.3 s) · 75 % overlap"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Fingerprint",
+      "items": [
+        "n_fft 1024 · hop 256 · 513 bins · peaks 20×20 above −50 dB · fan 5 · Δt 1–200 · bin 10"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Thresholds",
+      "items": [
+        "MIN_CONFIDENCE 0.10 · consensus 3 windows · hold 4.0 s · stream timeout 30 s · offset × 0.032 s"
+      ]
+    }
+  ]
+}

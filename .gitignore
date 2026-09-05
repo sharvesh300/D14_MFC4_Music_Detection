@@ -18,3 +18,6 @@ database/*.db-journal
 database/*.db-wal
 database/*.db-shm
 experiments/
+
+# archify tooling receipts (regenerable, contain absolute local paths)
+docs/*.visual-check.json
